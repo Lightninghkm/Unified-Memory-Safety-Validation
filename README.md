@@ -2,7 +2,7 @@
 
 This framework is the push-button solution of the combined memory safety validations of the [DataGuard](https://www.ndss-symposium.org/wp-content/uploads/2022-60-paper.pdf) and the [Uriah](https://dl.acm.org/doi/pdf/10.1145/3658644.3690310) frameworks.
 
-## Installation
+## Build Instruction
 The framework is tested on [Ubuntu 20.04](https://releases.ubuntu.com/focal/), it has not been tested on other platforms up to now, so Ubuntu 20.04 is preferred.
 
 ### LLVM 10.0.0
@@ -22,21 +22,25 @@ Make sure you specify the ```$PATH```s correctly.
 
 The SVF code is available in ```./program-dependence-graph/SVF```
 
+Please refer to SVF's official [website](https://svf-tools.github.io/SVF/) for detailed documentation
+
 To build SVF for alias analysis, run:
 
 ```bash
 sudo apt install cmake gcc g++ libtinfo5 libz-dev libzstd-dev zip wget libncurses5-dev
 
-cd ./program-dependence-graph/SVF 
-source ./build.sh
+cd Unified-Memory-Safety-Validation/program-dependence-graph/SVF 
+source build.sh
 ```
 
 ### Build PDG
 
 The PDG code is available in ```/program-dependence-graph```
 
+Please refer to the [paper](https://dl.acm.org/doi/pdf/10.1145/3133956.3134066) of Program Dependence Graph (PDG).
+
 ```
-cd ./program-dependence-graph
+cd Unified-Memory-Safety-Validation/program-dependence-graph
 mkdir build
 cd build
 cmake ..
@@ -49,7 +53,7 @@ cd ..
 To build the memory safety validation pass, simply run:
 
 ```
-cd ..
+cd Unified-Memory-Safety-Validation/
 cmake .
 make
 ```
