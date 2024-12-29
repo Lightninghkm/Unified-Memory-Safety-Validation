@@ -462,8 +462,6 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     // Local data structures.
     // ------------------------------------------------------------------
     const Instruction *instruction;
-    int heapPointerCount = 0;      // Not used in the original code, but we keep it
-    int globalPointerCount = 0;    // Also not used in the original code
 
     std::set<const llvm::Value *> NonAliasedHeapPointers;
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> heapSeqPointerSet;
