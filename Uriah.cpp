@@ -459,7 +459,7 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     std::set<const llvm::Value *> &AliasedWithHeapDynPointers)
 {
     // ------------------------------------------------------------------
-    // Local data structures (as before).
+    // Local data structures.
     // ------------------------------------------------------------------
     const Instruction *instruction;
     int heapPointerCount = 0;      // Not used in the original code, but we keep it
@@ -510,8 +510,7 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     );
 
     // ------------------------------------------------------------------
-    // Remove overlap between “originally unsafe” and “alias-unsafe”
-    // (the same logic as in the original code).
+    // Remove overlap between "originally unsafe" and "alias-unsafe".
     // ------------------------------------------------------------------
     for (auto it = unsafeAliasHeapPointerSet.begin();
               it != unsafeAliasHeapPointerSet.end(); )
