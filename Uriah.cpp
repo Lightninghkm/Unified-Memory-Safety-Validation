@@ -1,3 +1,4 @@
+
 /*
  * Copyright © 2024 Kaiming Huang
  *
@@ -236,6 +237,7 @@ void UnifiedMemSafe::Uriah::identifyHeapObjectClassification(
     std::map<const VariableMapKeyType *, VariableInfo> &heapPointerSet,
     std::map<const VariableMapKeyType *, VariableInfo> &heapSeqPointerSet,
     std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
+    std::map<const VariableMapKeyType *, VariableInfo> &heapDynPtrSet,
     std::map<const VariableMapKeyType *, VariableInfo> &unsafeUniqueHeapPointerSet,
     std::map<const VariableMapKeyType *, VariableInfo> &unsafeHeapPointerSet)
 {
@@ -252,6 +254,9 @@ void UnifiedMemSafe::Uriah::identifyHeapObjectClassification(
             }
             if (it->second.classification == UnifiedMemSafe::VariableStates::Dyn) {
                 heapDynPointerSet[it->first] = it->second;
+                if (CastInst *cast = dyn_cast_or_null<CastInst>(const_cast<Value*>(it->first))) {
+                    heapDynPtrSet[it->first] = it->second;
+                }
             }
         }
     }
@@ -266,6 +271,9 @@ void UnifiedMemSafe::Uriah::identifyAndClassifyUnsafeHeapObjects(
     std::map<const VariableMapKeyType *, VariableInfo> &unsafeUniqueHeapPointerSet,
     std::map<const VariableMapKeyType *, VariableInfo> &unsafeAliasHeapPointerSet,
     std::map<const VariableMapKeyType *, VariableInfo> &unsafeHeapPointerSet,
+    std::map<const VariableMapKeyType *, VariableInfo> &heapSeqPointerSet,
+    std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
+    std::map<const VariableMapKeyType *, VariableInfo> &heapDynPtrSet,
     AnalysisState &TheState,
     pdg::PTAWrapper &ptaw)
 {
@@ -311,6 +319,15 @@ void UnifiedMemSafe::Uriah::identifyAndClassifyUnsafeHeapObjects(
                         unsafeAliasHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                         unsafeHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                         heapPointerSet[mayAliasPointer] = *aliasVariableInfo;
+                        if (aliasVariableInfo->classification == UnifiedMemSafe::VariableStates::Seq){
+                            heapSeqPointerSet[mayAliasPointer] = *aliasVariableInfo;
+                        }
+                        if (aliasVariableInfo->classification == UnifiedMemSafe::VariableStates::Dyn){
+                            heapDynPointerSet[mayAliasPointer] = *aliasVariableInfo;
+                            if (CastInst *cast = dyn_cast_or_null<CastInst>(mayAliasPointer)) {
+                                heapDynPtrSet[mayAliasPointer] = *aliasVariableInfo;
+                            }
+                        }
                     }
                 }
             }
@@ -466,6 +483,7 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     std::set<const llvm::Value *> NonAliasedHeapPointers;
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> heapSeqPointerSet;
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> heapDynPointerSet;
+    std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> heapDynPtrSet; // Need further validation
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> unsafeUniqueHeapPointerSet;
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> unsafeAliasHeapPointerSet;
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> unsafeHeapPointerSet;
@@ -491,6 +509,7 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
         heapPointerSet,
         heapSeqPointerSet,
         heapDynPointerSet,
+        heapDynPtrSet,
         unsafeUniqueHeapPointerSet,
         unsafeHeapPointerSet
     );
@@ -503,6 +522,9 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
         unsafeUniqueHeapPointerSet,
         unsafeAliasHeapPointerSet,
         unsafeHeapPointerSet,
+        heapSeqPointerSet,
+        heapDynPointerSet,
+        heapDynPtrSet,
         TheState,
         ptaw
     );
@@ -526,6 +548,19 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     errs() << GREEN << "Total Heap Pointer Number:\t\t\t\t" 
            << DETAIL << heapPointerSet.size() 
            << NORMAL << "\n";
+
+    /*
+    for (const auto &pair : heapPointerSet) {
+        const llvm::Value *key = pair.first;
+
+        // Use llvm::dyn_cast to cast the key to an Instruction
+        if (const llvm::Instruction *instruction = llvm::dyn_cast<llvm::Instruction>(key)) {
+            // Print the instruction using LLVM's print method
+            instruction->print(llvm::outs());
+            llvm::outs() << "\n";
+        } 
+    }
+    */
 
     // ------------------------------------------------------------------
     // 4) Identify non-aliased heap pointers and alias representatives
@@ -552,6 +587,19 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
            << DETAIL << unsafeAliasHeapPointerSet.size() 
            << NORMAL << "\n\n";
 
+    /*
+    for (const auto &pair : unsafeAliasHeapPointerSet) {
+        const llvm::Value *key = pair.first;
+
+        // Use llvm::dyn_cast to cast the key to an Instruction
+        if (const llvm::Instruction *instruction = llvm::dyn_cast<llvm::Instruction>(key)) {
+            // Print the instruction using LLVM's print method
+            instruction->print(llvm::outs());
+            llvm::outs() << "\n";
+        } 
+    }
+    */
+
     errs() << GREEN << "Heap Seq Pointer:\t\t\t\t\t" 
            << DETAIL << heapSeqPointerSet.size() 
            << NORMAL << "\n";
@@ -560,6 +608,20 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
            << DETAIL << heapDynPointerSet.size() 
            << NORMAL << "\n";
 
+    
+    /*
+    for (const auto &pair : heapDynPointerSet) {
+        const llvm::Value *key = pair.first;
+
+        // Use llvm::dyn_cast to cast the key to an Instruction
+        if (const llvm::Instruction *instruction = llvm::dyn_cast<llvm::Instruction>(key)) {
+            // Print the instruction using LLVM's print method
+            instruction->print(llvm::outs());
+            llvm::outs() << "\n";
+        } 
+    }
+    */
+    
     // ------------------------------------------------------------------
     // 5) Determine which allocations are aliased with Seq or Dyn pointers
     // ------------------------------------------------------------------
@@ -584,7 +646,7 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     valueRangeAnalysis(CurrentModule, heapPointerSet, TheState);
 
     UnifiedMemSafe::CompatibleType compTypePass;
-    compTypePass.safeTypeCastAnalysis(heapDynPointerSet, TheState);
+    compTypePass.safeTypeCastAnalysis(heapDynPtrSet, TheState);
 }
 
 

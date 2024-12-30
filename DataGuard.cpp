@@ -78,6 +78,7 @@ void DataGuard::identifyDifferentKindsOfUnsafeStackPointers(
     std::set<Value *> unsafeStackPointerSet;
     std::map<const VariableMapKeyType *, VariableInfo> stackSeqPointerSet;
     std::map<const VariableMapKeyType *, VariableInfo> stackDynPointerSet;
+    std::map<const VariableMapKeyType *, VariableInfo> stackDynPtrSet; // Need further validation
 
     if (!PTA.hasPTASetup()) {
         errs() << RED << "Points to info not computed\n" << NORMAL;
@@ -135,6 +136,9 @@ void DataGuard::identifyDifferentKindsOfUnsafeStackPointers(
                     stackSeqPointerSet[it->first] = it->second;
                 } else if (it->second.classification == VariableStates::Dyn) {
                     stackDynPointerSet[it->first] = it->second;
+                    if (CastInst *cast = dyn_cast_or_null<CastInst>(const_cast<Value*>(it->first))) {
+                        stackDynPtrSet[it->first] = it->second;
+                    }
                 }
             }
         }
@@ -151,5 +155,5 @@ void DataGuard::identifyDifferentKindsOfUnsafeStackPointers(
            << stackDynPointerSet.size() << NORMAL << "\n\n";
     valueRangeAnalysis(CurrentModule, stackSeqPointerSet, TheState);
     UnifiedMemSafe::CompatibleType compTypePass;
-    compTypePass.safeTypeCastAnalysis(stackDynPointerSet, TheState);
+    compTypePass.safeTypeCastAnalysis(stackDynPtrSet, TheState);
 }

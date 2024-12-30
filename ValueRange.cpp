@@ -384,7 +384,28 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                         if(UnifiedMemSafe::VariableMapKeyType *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)){
                             if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                 UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
-                                heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
+                                if (auto *gepInst = dyn_cast<llvm::GetElementPtrInst>(inst)) {
+                                    // Check the number of operands in the GEP instruction
+                                    auto index = (gepInst->getNumOperands() > 2) 
+                                                ? gepInst->getOperand(2)  // Use the third operand if more than 2 operands
+                                                : gepInst->getOperand(1); // Use the second operand otherwise
+
+                                    auto constant = dyn_cast<ConstantInt>(index);
+                                    if (constant) {
+                                        // If the offset is constant
+                                        int underlyingSize = dyn_cast<ConstantInt>(vmktinfo->size)->getSExtValue();
+                                        if (!constant->isNegative() && underlyingSize > 0) {
+                                            // Offset is within bounds, discard this case
+                                            continue;
+                                        } else {
+                                            // Offset is out of bounds, add to the set
+                                            heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
+                                        }
+                                    } else {
+                                        // If the index is not constant, add to the set
+                                        heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
+                                    }
+                                }
                             }
                         }
                         continue;
@@ -397,7 +418,13 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
 						auto &layout = M->getDataLayout();
 						auto numBytes = layout.getTypeAllocSize(arrayTy);
 						auto elmtBytes = layout.getTypeAllocSize(elmtTy);
-						auto index = inst->getOperand(2);
+				        llvm::Value* index;
+				        if(inst->getNumOperands() > 2)
+				            index = inst->getOperand(2);
+				        
+				        else{
+							index = inst->getOperand(1);
+				        }
 						auto constant = dyn_cast<ConstantInt>(index);
 						if (constant) {
 						    if (!constant->isNegative() && !constant->uge(size)) {
@@ -491,4 +518,19 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
         }
     }
     errs() << GREEN << "Unsafe Seq Pointer After Value Range:\t\t\t" << DETAIL << heapUnsafeSeqPointerSet.size()<< NORMAL << "\n"; 
+
+    /*for (const auto &pair : heapUnsafeSeqPointerSet) {
+        const llvm::Value *key = pair.first;
+
+        // Use llvm::dyn_cast to cast the key to an Instruction
+        if (const llvm::Instruction *instruction = llvm::dyn_cast<llvm::Instruction>(key)) {
+            // Print the instruction using LLVM's print method
+            instruction->print(llvm::outs());
+            llvm::outs() << "\n";
+        } else {
+            std::cerr << "Key cannot be cast to LLVM Instruction." << std::endl;
+        }
+    }
+    */
+
 }

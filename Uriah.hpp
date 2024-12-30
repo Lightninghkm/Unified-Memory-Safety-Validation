@@ -53,6 +53,7 @@ namespace UnifiedMemSafe {
             std::map<const VariableMapKeyType *, VariableInfo> &heapPointerSet,
             std::map<const VariableMapKeyType *, VariableInfo> &heapSeqPointerSet,
             std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
+            std::map<const VariableMapKeyType *, VariableInfo> &heapDynPtrSet,
             std::map<const VariableMapKeyType *, VariableInfo> &unsafeUniqueHeapPointerSet,
             std::map<const VariableMapKeyType *, VariableInfo> &unsafeHeapPointerSet
         );
@@ -62,6 +63,9 @@ namespace UnifiedMemSafe {
             std::map<const VariableMapKeyType *, VariableInfo> &unsafeUniqueHeapPointerSet,
             std::map<const VariableMapKeyType *, VariableInfo> &unsafeAliasHeapPointerSet,
             std::map<const VariableMapKeyType *, VariableInfo> &unsafeHeapPointerSet,
+            std::map<const VariableMapKeyType *, VariableInfo> &heapSeqPointerSet,
+            std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
+            std::map<const VariableMapKeyType *, VariableInfo> &heapDynPtrSet,
             AnalysisState &TheState,
             pdg::PTAWrapper &ptaw
         );

@@ -119,14 +119,14 @@ namespace
 		
 		int countIndirections(Type *T){
 			if (!(T->isPointerTy()))
-			return 0;
+				return 0;
 			PointerType *innerT = dyn_cast_or_null<PointerType>(T);
 			return countIndirections(innerT->getElementType()) + 1;
 		}
 		// unwraps a pointer until the innermost type
 		Type *unwrapPointer(Type *T){
 			if (!(T->isPointerTy()))
-			return T;
+				return T;
 			PointerType *innerT = dyn_cast_or_null<PointerType>(T);
 			return unwrapPointer(innerT->getElementType());
 		}
@@ -385,7 +385,7 @@ namespace
 						TheState.SetSizeForPointerVariable(ptroperand, varinfo->explicitSizeVariable);
 						TheState.SetInstantiatedExplicitSizeVariable(ptroperand, true);
 					}
-					errs() << PtrTypeToString(varinfo->classification) << " \n";
+					//errs() << PtrTypeToString(varinfo->classification) << " \n";
 					TheState.ClassifyPointerVariable(II, varinfo->classification);
 					TheState.SetSizeForPointerVariable(II, varinfo->size);
 				}
@@ -432,6 +432,7 @@ namespace
 						Constant *offset = dyn_cast_or_null<Constant>(Offset);
 						Constant *othersize = dyn_cast_or_null<Constant>(otherSize);
 						if (offset && othersize){
+							// Increment the offset of the resulting pointer, only for resulting pointer, base pointer stays the same.
 							otherSize= llvm::ConstantExpr::getSub(othersize, offset);
 						}
 					}
@@ -446,15 +447,11 @@ namespace
 		bool processCastInst(CastInst *II) {
 			if (!II)
 				return false;
-
 			// Log cast instruction details
 			logCastInstructionDetails(II);
 
 			Type *srcT = II->getSrcTy();
 			Type *dstT = II->getDestTy();
-
-			if (!srcT->isPointerTy())
-				return true;
 
 			UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(II->getOperand(0));
 			Type *innerSrcT = unwrapPointer(srcT);
@@ -462,6 +459,13 @@ namespace
 
 			if (isCastOfInterest(srcT, dstT, innerSrcT, innerDstT)) {
 				errs() << *II << "  Cast of Interest!\n";
+
+				if (!srcT->isPointerTy()) {
+					if (isa<ZExtInst>(II) || isa<SExtInst>(II) || isa<TruncInst>(II)) {
+						classifyExtOrTruncInst(cast<UnaryInstruction>(II));
+					}
+					return true;
+				}
 
 				// Handle various operand types for the cast
 				if (LoadInst *III = dyn_cast_or_null<LoadInst>(II->getOperand(0))) {
@@ -493,7 +497,11 @@ namespace
 
 		// Determines if a cast is of interest based on types
 		bool isCastOfInterest(Type *srcT, Type *dstT, Type *innerSrcT, Type *innerDstT) {
-			return countIndirections(srcT) != countIndirections(dstT) || !innerSrcT->isIntegerTy() || !innerDstT->isIntegerTy();
+			return true;
+
+			// Change it to always true if you would like to analyze integer type cast.
+			// Results will be largely overapproximated since LLVM treats char* as integer type as well.
+			// return countIndirections(srcT) != countIndirections(dstT) || !innerSrcT->isIntegerTy() || !innerDstT->isIntegerTy();
 		}
 
 		// Processes a `LoadInst` operand for a cast
@@ -606,6 +614,87 @@ namespace
 				TheState.SetSizeForPointerVariable(II, varinfo->size);
 			} else {
 				errs() << "!!! DON'T KNOW variable or doesn't have size\n";
+			}
+		}
+
+		void classifyExtOrTruncInst(Instruction *I) {
+			if (!I)
+				return;
+
+			// Log the instruction
+			errs() << "(EXTENSION/TRUNCATION) " << *I << "\n";
+
+			// Determine if the instruction could change the value
+			bool couldChangeValue = false;
+
+			if (ZExtInst *ZExt = dyn_cast<ZExtInst>(I)) {
+					// Zero extension only adds bits, so value never gets larger or become negative.
+					couldChangeValue = false; 
+			} 
+			
+			else if (SExtInst *SExt = dyn_cast<SExtInst>(I)) {
+				errs() << "Handling SExtInst: " << *SExt << "\n";
+
+				Type *srcType = SExt->getSrcTy();
+				Type *dstType = SExt->getDestTy();
+				
+				// Signed Extension can change value to make it larger or become negative.
+				if (srcType->isIntegerTy() && dstType->isIntegerTy()) {
+					couldChangeValue = true;
+				}
+			} 
+			
+			else if (TruncInst *Trunc = dyn_cast<TruncInst>(I)) {
+				errs() << "Handling TruncInst: " << *Trunc << "\n";
+
+				Type *srcType = Trunc->getSrcTy();
+				Type *dstType = Trunc->getType();
+
+				if (srcType->isIntegerTy() && dstType->isIntegerTy()) {
+					unsigned srcBitWidth = srcType->getIntegerBitWidth();
+					unsigned dstBitWidth = dstType->getIntegerBitWidth();
+
+					if (srcBitWidth > dstBitWidth) {
+						Value *operand = Trunc->getOperand(0);
+						errs() << "Operand of TruncInst: " << *operand << "\n";
+
+						if (auto *loadInst = dyn_cast<LoadInst>(operand)) {
+							Value *pointerOperand = loadInst->getPointerOperand();
+							errs() << "Pointer operand of LoadInst: " << *pointerOperand << "\n";
+
+							for (User *user : pointerOperand->users()) {
+								if (auto *storeInst = dyn_cast<StoreInst>(user)) {
+									Value *storedValue = storeInst->getValueOperand();
+									errs() << "Found StoreInst: " << *storeInst << "\n";
+									errs() << "Stored value: " << *storedValue << "\n";
+									// Truncating constant value could result in value change.
+									// Positive to negative can make the result be negative.
+									// Negative to Positive can make the result be very large.
+									// LLVM IR does not carry the signedness of resulting value.
+									// Assuming all unsafe for soundness.
+									if (auto *constantInt = dyn_cast<ConstantInt>(storedValue)) {
+											couldChangeValue = true;
+									}
+									// Non-constant value can change.
+									else {
+										couldChangeValue = true;
+									}
+									break;
+								}
+							}
+						} 
+						else {
+							errs() << "Operand is neither a LoadInst nor a constant, assuming potential signedness change.\n";
+							couldChangeValue = true;
+						}
+					}
+				}
+			}
+
+			// Perform classification if the value could change
+			if (couldChangeValue) {
+				TheState.ClassifyPointerVariable(I->getOperand(0), UnifiedMemSafe::VariableStates::Dyn);
+				TheState.ClassifyPointerVariable(I, UnifiedMemSafe::VariableStates::Dyn);
 			}
 		}
 

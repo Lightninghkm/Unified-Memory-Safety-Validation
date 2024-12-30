@@ -74,7 +74,7 @@ bool handleLoadCast(CastInst *II,
                                     Type *innerDstT,
                                     const AnalysisState &TheState)
 {
-    // Original code for analyzing the "LoadInst" sub-case:
+    // Analyzing the "LoadInst" sub-case:
     Type *realSrcType = UnwrapPointer(loadInst->getType());
     Type *realDstType = nullptr;
 
@@ -248,7 +248,7 @@ bool handleCallInstCast(
     std::map<const UnifiedMemSafe::VariableMapKeyType *,
              UnifiedMemSafe::VariableInfo>::iterator &it)
 {
-    // If operand is a CallInst, original code just erases from the set
+    // If operand is a CallInst, erase from the set
     heapDynPointerSet.erase(it++);
     if (UnifiedMemSafe::VariableMapKeyType *CallVar =
             dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(op))
@@ -261,66 +261,66 @@ bool handleCallInstCast(
 }
 
 
+bool handleCastOperation(
+    CastInst *II,
+    std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
+    std::map<const VariableMapKeyType *, VariableInfo>::iterator &it,
+    Type *innerSrcT,
+    Type *innerDstT,
+    const AnalysisState &TheState)
+{
+    Value *op = II->getOperand(0);
+
+    if (LoadInst *loadInst = dyn_cast_or_null<LoadInst>(op)) {
+        return handleLoadCast(II, loadInst, heapDynPointerSet, it, innerSrcT, innerDstT, TheState);
+    } else if (GetElementPtrInst *gepInst = dyn_cast_or_null<GetElementPtrInst>(op)) {
+        return handleGetElementPtrCast(II, gepInst, heapDynPointerSet, it, innerSrcT, innerDstT);
+    } else if (CastInst *nestedCast = dyn_cast_or_null<CastInst>(op)) {
+        return handleCastInstCast(II, nestedCast, heapDynPointerSet, it, innerSrcT, innerDstT);
+    } else if (isa<CallInst>(op)) {
+        return handleCallInstCast(II, op, heapDynPointerSet, it);
+    }
+    return true; // If no cases match, just continue.
+}
+
 void CompatibleType::safeTypeCastAnalysis(
     std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
     const AnalysisState &TheState) 
 {
-    for (std::map<const UnifiedMemSafe::VariableMapKeyType *,
-                  UnifiedMemSafe::VariableInfo>::iterator it = heapDynPointerSet.begin();
-         it != heapDynPointerSet.end();)
-    {
+    for (auto it = heapDynPointerSet.begin(); it != heapDynPointerSet.end();) {
         const Instruction *instruction = dyn_cast_or_null<Instruction>(it->first);
         Instruction *dynInst = const_cast<llvm::Instruction *>(instruction);
 
-        // If it's a CastInst, analyze pointer/unsafe casts:
         if (CastInst *II = dyn_cast_or_null<CastInst>(dynInst)) {
             Type *srcT = II->getSrcTy();
             Type *dstT = II->getDestTy();
 
-            // If srcT is pointer, let's do deeper checks:
             if (srcT->isPointerTy()) {
                 Type *innerSrcT = UnwrapPointer(srcT);
                 Type *innerDstT = UnwrapPointer(dstT);
 
-                // If the cast is suspicious (different pointer-level or non-integer),
-                // we check all sub-cases:
                 if (CountIndirections(srcT) != CountIndirections(dstT) ||
-                    (!innerSrcT->isIntegerTy()) ||
-                    (!innerDstT->isIntegerTy()))
+                    !innerSrcT->isIntegerTy() || 
+                    !innerDstT->isIntegerTy()) 
                 {
-                    Value *op = II->getOperand(0);
-
-                    // 1) LoadInst cast
-                    if (LoadInst *loadInst = dyn_cast_or_null<LoadInst>(op)) {
-                        if (!handleLoadCast(II, loadInst, heapDynPointerSet, it, innerSrcT, innerDstT, TheState)) {
-                            // If the helper function erased the iterator, skip increment
-                            continue;
-                        }
+                    if (!handleCastOperation(II, heapDynPointerSet, it, innerSrcT, innerDstT, TheState)) {
+                        continue;
                     }
-                    // 2) GetElementPtrInst cast
-                    else if (GetElementPtrInst *gepInst = dyn_cast_or_null<GetElementPtrInst>(op)) {
-                        if (!handleGetElementPtrCast(II, gepInst, heapDynPointerSet, it, innerSrcT, innerDstT)) {
-                            continue;
-                        }
+                } else if (innerSrcT->isIntegerTy() && innerDstT->isIntegerTy() && !isa<SExtInst>(II) && !isa<TruncInst>(II)) {
+                    if (!handleCastOperation(II, heapDynPointerSet, it, innerSrcT, innerDstT, TheState)) {
+                        continue;
                     }
-                    // 3) Another CastInst as operand
-                    else if (CastInst *nestedCast = dyn_cast_or_null<CastInst>(op)) {
-                        if (!handleCastInstCast(II, nestedCast, heapDynPointerSet, it, innerSrcT, innerDstT)) {
-                            continue;
-                        }
-                    }
-                    // 4) CallInst as operand
-                    else if (isa<CallInst>(op)) {
-                        if (!handleCallInstCast(II, op, heapDynPointerSet, it)) {
-                            continue;
-                        }
-                    }
+                }
+            } else if (!isa<SExtInst>(II) && !isa<TruncInst>(II)) {
+                Type *innerSrcT = UnwrapPointer(srcT);
+                Type *innerDstT = UnwrapPointer(dstT);
+                if (!handleCastOperation(II, heapDynPointerSet, it, innerSrcT, innerDstT, TheState)) {
+                    continue;
                 }
             }
         }
 
-        // Only increment if we did NOT erase `it`:
-        if (heapDynPointerSet.size() != 0) {
+        if (!heapDynPointerSet.empty()) {
             ++it;
         } else {
             break;
@@ -329,6 +329,19 @@ void CompatibleType::safeTypeCastAnalysis(
 
     errs() << GREEN << "Compatible-Type Cast Analysis:\t\t\t\t"
            << DETAIL << heapDynPointerSet.size() << NORMAL << "\n\n\n";
-}
+    
+    /*
+    for (const auto &pair : heapDynPointerSet) {
+        const llvm::Value *key = pair.first;
 
+        // Use llvm::dyn_cast to cast the key to an Instruction
+        if (const llvm::Instruction *instruction = llvm::dyn_cast<llvm::Instruction>(key)) {
+            // Print the instruction using LLVM's print method
+            instruction->print(llvm::outs());
+            llvm::outs() << "\n";
+        } 
+    }
+    */
+    
+}
 
