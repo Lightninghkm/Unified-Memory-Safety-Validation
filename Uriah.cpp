@@ -574,18 +574,18 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     // Print stats about the number of allocations
     errs() << GREEN << "Number of Heap Allocations:\t\t\t\t" 
            << DETAIL << NonAliasedHeapPointers.size() 
-           << "\n";
+           << "\n\n";
 
     // ------------------------------------------------------------------
     // Print + final stats about unsafe pointers
     // ------------------------------------------------------------------
-    errs() << GREEN << "CCured Unsafe Heap Pointer:\t\t\t\t" 
+    errs() << GREEN << "CCured Unsafe Heap Pointer Count:\t\t\t" 
            << DETAIL << unsafeUniqueHeapPointerSet.size() 
-           << NORMAL << "\n";
-
-    errs() << GREEN << "Unsafe Heap Pointer By Alias:\t\t\t\t" 
-           << DETAIL << unsafeAliasHeapPointerSet.size() 
            << NORMAL << "\n\n";
+
+    //errs() << GREEN << "Unsafe Heap Pointer By Alias:\t\t\t\t" 
+           //<< DETAIL << unsafeAliasHeapPointerSet.size() 
+           //<< NORMAL << "\n\n";
 
     /*
     for (const auto &pair : unsafeAliasHeapPointerSet) {
@@ -600,11 +600,11 @@ void Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
     }
     */
 
-    errs() << GREEN << "Heap Seq Pointer:\t\t\t\t\t" 
+    errs() << GREEN << "Heap Seq Pointer Count:\t\t\t\t\t" 
            << DETAIL << heapSeqPointerSet.size() 
            << NORMAL << "\n";
 
-    errs() << GREEN << "Heap Wild Pointer:\t\t\t\t\t" 
+    errs() << GREEN << "Heap Dyn Pointer Count:\t\t\t\t\t" 
            << DETAIL << heapDynPointerSet.size() 
            << NORMAL << "\n";
 

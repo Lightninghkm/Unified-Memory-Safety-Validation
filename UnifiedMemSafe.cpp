@@ -497,11 +497,11 @@ namespace
 
 		// Determines if a cast is of interest based on types
 		bool isCastOfInterest(Type *srcT, Type *dstT, Type *innerSrcT, Type *innerDstT) {
-			return true;
+			//return true;
 
 			// Change it to always true if you would like to analyze integer type cast.
 			// Results will be largely overapproximated since LLVM treats char* as integer type as well.
-			// return countIndirections(srcT) != countIndirections(dstT) || !innerSrcT->isIntegerTy() || !innerDstT->isIntegerTy();
+			return countIndirections(srcT) != countIndirections(dstT) || !innerSrcT->isIntegerTy() || !innerDstT->isIntegerTy();
 		}
 
 		// Processes a `LoadInst` operand for a cast

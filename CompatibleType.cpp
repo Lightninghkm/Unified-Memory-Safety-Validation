@@ -327,7 +327,7 @@ void CompatibleType::safeTypeCastAnalysis(
         }
     }
 
-    errs() << GREEN << "Compatible-Type Cast Analysis:\t\t\t\t"
+    errs() << GREEN << "Unsafe Dyn Pointer After Compatible-Type Cast Analysis:\t"
            << DETAIL << heapDynPointerSet.size() << NORMAL << "\n\n\n";
     
     /*

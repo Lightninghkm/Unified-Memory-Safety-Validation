@@ -517,7 +517,7 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
             }
         }
     }
-    errs() << GREEN << "Unsafe Seq Pointer After Value Range:\t\t\t" << DETAIL << heapUnsafeSeqPointerSet.size()<< NORMAL << "\n"; 
+    errs() << GREEN << "Unsafe Seq Pointer After Value Range Analysis:\t\t" << DETAIL << heapUnsafeSeqPointerSet.size()<< NORMAL << "\n"; 
 
     /*for (const auto &pair : heapUnsafeSeqPointerSet) {
         const llvm::Value *key = pair.first;

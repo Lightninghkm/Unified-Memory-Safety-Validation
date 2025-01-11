@@ -102,7 +102,7 @@ void DataGuard::identifyDifferentKindsOfUnsafeStackPointers(
     }
 
     int totalStackPointerCount = static_cast<int>(totalStackPointerSet.size());
-    errs() << NORMAL << "-------------STACK MEMORY SAFETY ANALYSIS RESULTS-------------\n";
+    errs() << NORMAL << "-------------STACK MEMORY SAFETY ANALYSIS RESULTS--------------\n";
     errs() << NORMAL << "\n";
     errs() << GREEN << "Total Stack Pointer Number:\t\t\t\t" << DETAIL
            << totalStackPointerCount << NORMAL << "\n\n";
@@ -147,7 +147,7 @@ void DataGuard::identifyDifferentKindsOfUnsafeStackPointers(
     // -------------------------------------------------------------------
     //  PRINT RESULTS FOR "UNSAFE" POINTERS
     // -------------------------------------------------------------------
-    errs() << GREEN << "Unsafe Stack Pointer Count:\t\t\t\t" << DETAIL
+    errs() << GREEN << "CCured Unsafe Stack Pointer Count:\t\t\t" << DETAIL
            << unsafeStackPointerSet.size() << NORMAL << "\n\n";
     errs() << GREEN << "Stack Seq Pointer Count:\t\t\t\t" << DETAIL
            << stackSeqPointerSet.size() << NORMAL << "\n";
