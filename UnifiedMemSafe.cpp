@@ -453,7 +453,21 @@ namespace
 			Type *srcT = II->getSrcTy();
 			Type *dstT = II->getDestTy();
 
+			if (!srcT || !dstT) {
+				errs() << "Invalid source or destination type for CastInst: " << *II << "\n";
+				return false;
+			}
+
+			if (!II->getOperand(0)) {
+    			errs() << "Null operand for instruction: " << *II << "\n";
+    			return false;
+			}
+
 			UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(II->getOperand(0));
+			if (!varinfo) {
+				errs() << "PointerVariableInfo not found for operand: " << II->getOperand(0)<< "\n";
+				return false;
+			}
 			Type *innerSrcT = unwrapPointer(srcT);
 			Type *innerDstT = unwrapPointer(dstT);
 
