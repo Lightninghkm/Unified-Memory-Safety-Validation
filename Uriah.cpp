@@ -316,17 +316,24 @@ void UnifiedMemSafe::Uriah::identifyAndClassifyUnsafeHeapObjects(
                     if (TheState.GetPointerVariableInfo(mayAliasPointer) != nullptr) {
                         UnifiedMemSafe::VariableInfo *aliasVariableInfo = 
                             TheState.GetPointerVariableInfo(mayAliasPointer);
-                        unsafeAliasHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                         unsafeHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                         heapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                         if (aliasVariableInfo->classification == UnifiedMemSafe::VariableStates::Seq){
+                            unsafeUniqueHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                             heapSeqPointerSet[mayAliasPointer] = *aliasVariableInfo;
                         }
+                        else{
+                            unsafeAliasHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
+                        }
                         if (aliasVariableInfo->classification == UnifiedMemSafe::VariableStates::Dyn){
+                            unsafeUniqueHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                             heapDynPointerSet[mayAliasPointer] = *aliasVariableInfo;
                             if (CastInst *cast = dyn_cast_or_null<CastInst>(mayAliasPointer)) {
                                 heapDynPtrSet[mayAliasPointer] = *aliasVariableInfo;
                             }
+                        }
+                        else{
+                            unsafeAliasHeapPointerSet[mayAliasPointer] = *aliasVariableInfo;
                         }
                     }
                 }
