@@ -296,30 +296,35 @@ public:
     }
 
     RangeValue evaluateCast(llvm::CastInst &castOp, RangeState &state) const {
-         //errs() << "evaluateCast" << "\n";
         auto *op = castOp.getOperand(0);
         auto value = getRangeFor(op, state);
 
         if (value.isConstant()) {
             auto &layout = castOp.getModule()->getDataLayout();
             auto x = ConstantFoldCastOperand(castOp.getOpcode(), value.lvalue,
-                                             castOp.getDestTy(), layout);
+                                            castOp.getDestTy(), layout);
             auto y = ConstantFoldCastOperand(castOp.getOpcode(), value.rvalue,
-                                             castOp.getDestTy(), layout);
+                                            castOp.getDestTy(), layout);
+
             if (llvm::isa<llvm::ConstantExpr>(x) || llvm::isa<llvm::ConstantExpr>(y)) {
-                return infRange();
-            }
-            else {
-                RangeValue r;
+                return infRange(); // Cast produced a non-constant expression
+            } else {
                 auto *cix = dyn_cast<ConstantInt>(x);
                 auto *ciy = dyn_cast<ConstantInt>(y);
-                r.kind = PossibleRangeValues::constant;
-                r.lvalue = cix;
-                r.rvalue = ciy;
-                return r;
+
+                if (cix && ciy) {
+                    // Valid constants
+                    RangeValue r;
+                    r.kind = PossibleRangeValues::constant;
+                    r.lvalue = cix;
+                    r.rvalue = ciy;
+                    return r;
+                } else {
+                    // Cast failed to produce valid ConstantInt
+                    return infRange();
+                }
             }
-        }
-        else {
+        } else {
             RangeValue r;
             r.kind = value.kind;
             return r;
