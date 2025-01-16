@@ -456,8 +456,6 @@ namespace
 					Constant *offset = dyn_cast_or_null<Constant>(Offset);
 					Constant *othersize = dyn_cast_or_null<Constant>(otherSize);
 					if (offset && othersize) {
-						errs() << "varinfosize: " << *varinfo->size << "\n";
-						errs() << "othersize: " << *othersize << "\n";
 						// Increment the offset of the resulting pointer, only for resulting pointer, base pointer stays the same.
 						otherSize = llvm::ConstantExpr::getSub(othersize, offset);
 					}
