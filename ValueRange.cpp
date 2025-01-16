@@ -32,6 +32,7 @@
 #include <bitset>
 #include <memory>
 #include <string>
+#include <unordered_map> // for storeHappened
 
 #include "DataflowAnalysis.h"
 #include "ValueRange.hpp"
@@ -48,6 +49,18 @@ using std::string;
 using std::unique_ptr;
 
 
+// A small bounding threshold to avoid unbounded expansions
+static const uint64_t MAX_RANGE_SIZE = 1024;
+
+// Check if pointer is local alloca
+static bool isLocalAllocaPointer(Value *ptr) {
+    ptr = ptr->stripPointerCasts();
+    if (auto *AI = dyn_cast<AllocaInst>(ptr)) {
+        return true;
+    }
+    return false;
+}
+
 enum class PossibleRangeValues {
     unknown,
     constant,
@@ -62,60 +75,55 @@ struct RangeValue {
                    lvalue(nullptr),
                    rvalue(nullptr) {}
 
+    bool isUnknown()  const { return kind == PossibleRangeValues::unknown; }
+    bool isInfinity() const { return kind == PossibleRangeValues::infinity; }
+    bool isConstant() const { return kind == PossibleRangeValues::constant; }
 
-    bool isUnknown() const {
-        return kind == PossibleRangeValues::unknown;
-    }
-
-    bool isInfinity() const {
-        return kind == PossibleRangeValues::infinity;
-    }
-
-    bool isConstant() const {
-        return kind == PossibleRangeValues::constant;
-    }
-
-    RangeValue
-    operator|(const RangeValue &other) const {
+    // The original operator|
+    RangeValue operator|(const RangeValue &other) const {
         RangeValue r;
         if (isUnknown() || other.isUnknown()) {
             if (isUnknown()) {
                 return other;
-            }
-            else {
+            } else {
                 return *this;
             }
-        }
-        else if (isInfinity() || other.isInfinity()) {
+        } else if (isInfinity() || other.isInfinity()) {
             r.kind = PossibleRangeValues::infinity;
             return r;
-        }
-        else {
+        } else {
             auto &selfL = lvalue->getValue();
             auto &selfR = rvalue->getValue();
-            auto &otherL = (other.lvalue)->getValue();
-            auto &otherR = (other.rvalue)->getValue();
+            auto &otherL = other.lvalue->getValue();
+            auto &otherR = other.rvalue->getValue();
 
             r.kind = PossibleRangeValues::constant;
             if (selfL.slt(otherL)) {
                 r.lvalue = lvalue;
-            }
-            else {
+            } else {
                 r.lvalue = other.lvalue;
             }
-
             if (selfR.sgt(otherR)) {
                 r.rvalue = rvalue;
-            }
-            else {
+            } else {
                 r.rvalue = other.rvalue;
             }
-            return r;
         }
+        // bounding
+        if (r.kind == PossibleRangeValues::constant && r.lvalue && r.rvalue) {
+            APInt L = r.lvalue->getValue();
+            APInt R = r.rvalue->getValue();
+            APInt diff = (R.sgt(L) ? R - L : L - R);
+            if (diff.ugt(MAX_RANGE_SIZE)) {
+                r.kind   = PossibleRangeValues::infinity;
+                r.lvalue = nullptr;
+                r.rvalue = nullptr;
+            }
+        }
+        return r;
     }
 
-    bool
-    operator==(const RangeValue &other) const {
+    bool operator==(const RangeValue &other) const {
         if (kind == PossibleRangeValues::constant &&
             other.kind == PossibleRangeValues::constant) {
             auto &selfL = lvalue->getValue();
@@ -128,20 +136,17 @@ struct RangeValue {
             return kind == other.kind;
         }
     }
-
 };
 
 RangeValue makeRange(LLVMContext &context, APInt &left, APInt &right) {
-    //errs() << "makeRange" << "\n";
     RangeValue r;
-    r.kind = PossibleRangeValues::constant;
+    r.kind   = PossibleRangeValues::constant;
     r.lvalue = ConstantInt::get(context, left);
     r.rvalue = ConstantInt::get(context, right);
     return r;
 }
 
 RangeValue infRange() {
-     //errs() << "infRange" << "\n";
     RangeValue r;
     r.kind = PossibleRangeValues::infinity;
     return r;
@@ -150,6 +155,7 @@ RangeValue infRange() {
 using RangeState  = analysis::AbstractState<RangeValue>;
 using RangeResult = analysis::DataflowResult<RangeValue>;
 
+// The meet: reuses operator|( ) from RangeValue
 class RangeMeet : public analysis::Meet<RangeValue, RangeMeet> {
 public:
     RangeValue
@@ -160,12 +166,48 @@ public:
 
 class RangeTransfer {
 public:
-    RangeValue getRangeFor(llvm::Value *v, RangeState &state) const {
-         //errs() << "getRangeFor" << "\n";
-        if (auto *constant = llvm::dyn_cast<llvm::ConstantInt>(v)) {
+    // ADDED: We track pointers that have been stored to once, so we skip merging on subsequent stores
+    // "only consider the most recent one"
+    // Key = pointer Value*, Value = boolean
+    // Once we store once, we set storeHappened[ptr]=true
+    // Next time we store => we just overwrite
+    mutable std::unordered_map<llvm::Value*, bool> storeHappened;
+
+    void operator()(llvm::Value &I, RangeState &state) {
+        // If store => handle
+        if (auto *st = dyn_cast<StoreInst>(&I)) {
+            handleStore(*st, state);
+            return;
+        }
+        // If load => handle
+        if (auto *ld = dyn_cast<LoadInst>(&I)) {
+            handleLoad(*ld, state);
+            return;
+        }
+
+        // Original logic
+        if (auto *constant = llvm::dyn_cast<llvm::ConstantInt>(&I)) {
             RangeValue r;
             r.kind = PossibleRangeValues::constant;
             r.lvalue = r.rvalue = constant;
+            state[&I] = r;
+        }
+        else if (auto *binOp = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+            state[binOp] = evaluateBinOP(*binOp, state);
+        }
+        else if (auto *castOp = llvm::dyn_cast<llvm::CastInst>(&I)) {
+            state[castOp] = evaluateCast(*castOp, state);
+        }
+        else {
+            state[&I].kind = PossibleRangeValues::infinity;
+        }
+    }
+
+    RangeValue getRangeFor(llvm::Value *v, RangeState &state) const {
+        if (auto *cint = dyn_cast<ConstantInt>(v)) {
+            RangeValue r;
+            r.kind = PossibleRangeValues::constant;
+            r.lvalue = r.rvalue = cint;
             return r;
         }
         return state[v];
@@ -173,8 +215,6 @@ public:
 
     RangeValue evaluateBinOP(llvm::BinaryOperator &binOp,
                              RangeState &state) const {
-
-        // errs() << "evaluateBinop" << "\n";
         auto *op1 = binOp.getOperand(0);
         auto *op2 = binOp.getOperand(1);
         auto range1 = getRangeFor(op1, state);
@@ -186,30 +226,27 @@ public:
             auto l2 = range2.lvalue->getValue();
             auto r2 = range2.rvalue->getValue();
 
-            auto &context = (range1.lvalue)->getContext();
+            auto &ctx = (range1.lvalue)->getContext();
             auto opcode = binOp.getOpcode();
 
             if (opcode == Instruction::Add) {
-                bool ofl, ofr;
-                auto l = l1.sadd_ov(l2, ofl);
-                auto r = r1.sadd_ov(r2, ofr);
-                if (ofl || ofr) {
+                bool of1, of2;
+                APInt sum1 = l1.sadd_ov(l2, of1);
+                APInt sum2 = r1.sadd_ov(r2, of2);
+                if (of1 || of2) {
                     return infRange();
                 }
-                else {
-                    return makeRange(context, l, r);
-                }
+                return makeRange(ctx, sum1, sum2);
             }
+            // For simplicity, other ops => your original logic
             else if (opcode == Instruction::Sub) {
-                bool ofl, ofr;
-                auto l = l1.ssub_ov(r2, ofl);
-                auto r = r1.ssub_ov(l2, ofr);
-                if (ofl || ofr) {
+                bool of1, of2;
+                APInt a = l1.ssub_ov(r2, of1);
+                APInt b = r1.ssub_ov(l2, of2);
+                if (of1 || of2) {
                     return infRange();
                 }
-                else {
-                    return makeRange(context, l, r);
-                }
+                return makeRange(ctx, a, b);
             }
             else if (opcode == Instruction::Mul) {
                 SmallVector<APInt, 4> candidates;
@@ -218,144 +255,137 @@ public:
                 candidates.push_back(l1.smul_ov(r2, ofFlags[1]));
                 candidates.push_back(r1.smul_ov(l2, ofFlags[2]));
                 candidates.push_back(r1.smul_ov(r2, ofFlags[3]));
-                for (auto of:ofFlags) {
-                    if (of) {
-                        return infRange();
-                    }
+                for (auto flag: ofFlags) {
+                    if (flag) return infRange();
                 }
-                auto max = candidates[0];
-                for (auto &x : candidates) {
-                    if (x.sgt(max)) {
-                        max = x;
-                    }
+                APInt maxv = candidates[0];
+                APInt minv = candidates[0];
+                for (auto &c : candidates) {
+                    if (c.sgt(maxv)) maxv = c;
+                    if (c.slt(minv)) minv = c;
                 }
-                auto min = candidates[0];
-                for (auto &x : candidates) {
-                    if (x.slt(min)) {
-                        min = x;
-                    }
-                }
-                return makeRange(context, min, max);
+                return makeRange(ctx, minv, maxv);
             }
             else if (opcode == Instruction::SDiv) {
+                // your original sdiv logic
                 if (l2.isNegative() && r2.isStrictlyPositive()) {
                     auto abs1 = l1.abs();
                     auto abs2 = r1.abs();
                     auto abs = abs1.sgt(abs2) ? abs1 : abs2;
-                    APInt l(abs);
-                    l.flipAllBits();
-                    ++l;
-                    return makeRange(context, l, abs);
+                    APInt ll(abs);
+                    ll.flipAllBits();
+                    ++ll;
+                    return makeRange(ctx, ll, abs);
                 }
                 else {
-                    SmallVector<APInt, 4> candidates;
-                    bool ofFlags[4];
-                    candidates.push_back(l1.sdiv_ov(l2, ofFlags[0]));
-                    candidates.push_back(l1.sdiv_ov(r2, ofFlags[1]));
-                    candidates.push_back(r1.sdiv_ov(l2, ofFlags[2]));
-                    candidates.push_back(r1.sdiv_ov(r2, ofFlags[3]));
-                    for (auto of:ofFlags) {
-                        if (of) {
-                            return infRange();
-                        }
+                    SmallVector<APInt, 4> cands;
+                    bool fl[4];
+                    cands.push_back(l1.sdiv_ov(l2, fl[0]));
+                    cands.push_back(l1.sdiv_ov(r2, fl[1]));
+                    cands.push_back(r1.sdiv_ov(l2, fl[2]));
+                    cands.push_back(r1.sdiv_ov(r2, fl[3]));
+                    for (auto f: fl) {
+                        if (f) return infRange();
                     }
-                    auto max = candidates[0];
-                    for (auto &x : candidates) {
-                        if (x.sgt(max)) {
-                            max = x;
-                        }
+                    APInt mx = cands[0], mn = cands[0];
+                    for (auto &cc: cands) {
+                        if (cc.sgt(mx)) mx = cc;
+                        if (cc.slt(mn)) mn = cc;
                     }
-                    auto min = candidates[0];
-                    for (auto &x : candidates) {
-                        if (x.slt(min)) {
-                            min = x;
-                        }
-                    }
-                    return makeRange(context, min, max);
+                    return makeRange(ctx, mn, mx);
                 }
             }
             else if (opcode == Instruction::UDiv) {
-                auto l = r1.udiv(l2);
-                auto r = l1.udiv(r2);
-                return makeRange(context, l, r);
+                APInt a = r1.udiv(l2);
+                APInt b = l1.udiv(r2);
+                return makeRange(ctx, a, b);
             }
             else {
-                // todo: fill in
                 return infRange();
             }
         }
         else if (range1.isInfinity() || range2.isInfinity()) {
-            RangeValue r;
-            r.kind = PossibleRangeValues::infinity;
-            return r;
+            RangeValue rr;
+            rr.kind = PossibleRangeValues::infinity;
+            return rr;
         }
         else {
-            RangeValue r;
-            return r;
+            // fallback => unknown
+            RangeValue rr;
+            return rr;
         }
     }
 
-    RangeValue evaluateCast(llvm::CastInst &castOp, RangeState &state) const {
-        auto *op = castOp.getOperand(0);
-        auto value = getRangeFor(op, state);
+    RangeValue evaluateCast(llvm::CastInst &Cst, RangeState &state) const {
+        auto valRange = getRangeFor(Cst.getOperand(0), state);
+        if (!valRange.isConstant()) {
+            RangeValue r;
+            r.kind = valRange.kind;
+            return r;
+        }
+        auto &layout = Cst.getModule()->getDataLayout();
+        Constant *cl = ConstantFoldCastOperand(Cst.getOpcode(), valRange.lvalue,
+                                               Cst.getDestTy(), layout);
+        Constant *cr = ConstantFoldCastOperand(Cst.getOpcode(), valRange.rvalue,
+                                               Cst.getDestTy(), layout);
+        if (!cl || !cr || isa<ConstantExpr>(cl) || isa<ConstantExpr>(cr)) {
+            return infRange();
+        }
+        auto *cli = dyn_cast<ConstantInt>(cl);
+        auto *cri = dyn_cast<ConstantInt>(cr);
+        if (!cli || !cri) {
+            return infRange();
+        }
+        RangeValue rv;
+        rv.kind   = PossibleRangeValues::constant;
+        rv.lvalue = cli;
+        rv.rvalue = cri;
+        return rv;
+    }
 
-        if (value.isConstant()) {
-            auto &layout = castOp.getModule()->getDataLayout();
-            auto x = ConstantFoldCastOperand(castOp.getOpcode(), value.lvalue,
-                                            castOp.getDestTy(), layout);
-            auto y = ConstantFoldCastOperand(castOp.getOpcode(), value.rvalue,
-                                            castOp.getDestTy(), layout);
+private:
+    void handleStore(StoreInst &SI, RangeState &state) const {
+        llvm::Value *val = SI.getValueOperand();
+        llvm::Value *ptr = SI.getPointerOperand();
 
-            if (llvm::isa<llvm::ConstantExpr>(x) || llvm::isa<llvm::ConstantExpr>(y)) {
-                return infRange(); // Cast produced a non-constant expression
+        if (isLocalAllocaPointer(ptr)) {
+            // If we've stored to 'ptr' before, do not merge; just overwrite
+            // "only consider the most recent one"
+            auto it = storeHappened.find(ptr);
+            // read the range of 'val'
+            auto valRange = getRangeFor(val, state);
+
+            if (it == storeHappened.end()) {
+                // first time storing
+                storeHappened[ptr] = true;
+                state[ptr] = valRange;
             } else {
-                auto *cix = dyn_cast<ConstantInt>(x);
-                auto *ciy = dyn_cast<ConstantInt>(y);
-
-                if (cix && ciy) {
-                    // Valid constants
-                    RangeValue r;
-                    r.kind = PossibleRangeValues::constant;
-                    r.lvalue = cix;
-                    r.rvalue = ciy;
-                    return r;
-                } else {
-                    // Cast failed to produce valid ConstantInt
-                    return infRange();
-                }
+                // subsequent store => just overwrite
+                // no merges with old state
+                state[ptr] = valRange;
             }
-        } else {
-            RangeValue r;
-            r.kind = value.kind;
-            return r;
         }
     }
 
-    void
-    operator()(llvm::Value &i, RangeState &state) {
-        
-        if (auto *constant = llvm::dyn_cast<llvm::ConstantInt>(&i)) {
-            RangeValue r;
-            r.kind = PossibleRangeValues::constant;
-            r.lvalue = r.rvalue = constant;
-            state[&i] = r;
+    void handleLoad(LoadInst &LI, RangeState &state) const {
+        llvm::Value *ptr = LI.getPointerOperand();
+        if (isLocalAllocaPointer(ptr)) {
+            auto it = state.find(ptr);
+            if (it != state.end()) {
+                state[&LI] = it->second;
+                return;
+            }
         }
-        else if (auto *binOp = llvm::dyn_cast<llvm::BinaryOperator>(&i)) {
-            state[binOp] = evaluateBinOP(*binOp, state);
-        }
-        else if (auto *castOp = llvm::dyn_cast<llvm::CastInst>(&i)) {
-            state[castOp] = evaluateCast(*castOp, state);
-        }
-        else {
-            state[&i].kind = PossibleRangeValues::infinity;
-        }
+        // fallback => unknown or infinity
+        state[&LI].kind = PossibleRangeValues::infinity;
     }
 };
 
-void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo>heapSeqPointerSet, UnifiedMemSafe::AnalysisState TheState){
-    // I removed the print messages for cleanness in this pass
-    // If you want to print, e.g., declaration and use sites, please refer to DataGuard Repository for the statements
-	auto *mainFunction = M->getFunction("main");
+void valueRangeAnalysis(Module *M,
+    std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo>heapSeqPointerSet,
+    UnifiedMemSafe::AnalysisState TheState){
+
+    auto *mainFunction = M->getFunction("main");
     if (!mainFunction) {
        errs() << RED << "Unable to find main function for Value-Range Analysis! Skipping!\n" << NORMAL;
        return;
@@ -390,24 +420,19 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                             if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                 UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
                                 if (auto *gepInst = dyn_cast<llvm::GetElementPtrInst>(inst)) {
-                                    // Check the number of operands in the GEP instruction
                                     auto index = (gepInst->getNumOperands() > 2) 
-                                                ? gepInst->getOperand(2)  // Use the third operand if more than 2 operands
-                                                : gepInst->getOperand(1); // Use the second operand otherwise
+                                                ? gepInst->getOperand(2)
+                                                : gepInst->getOperand(1);
 
                                     auto constant = dyn_cast<ConstantInt>(index);
                                     if (constant) {
-                                        // If the offset is constant
                                         int underlyingSize = dyn_cast<ConstantInt>(vmktinfo->size)->getSExtValue();
                                         if (!constant->isNegative() && underlyingSize > 0) {
-                                            // Offset is within bounds, discard this case
                                             continue;
                                         } else {
-                                            // Offset is out of bounds, add to the set
                                             heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                         }
                                     } else {
-                                        // If the index is not constant, add to the set
                                         heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                     }
                                 }
@@ -415,8 +440,6 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                         }
                         continue;
 		            }
-		            
-		            
 		            else if(arrayTy){
 						auto size = arrayTy->getNumElements();
 						auto elmtTy = arrayTy->getElementType();
@@ -426,7 +449,6 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
 				        llvm::Value* index;
 				        if(inst->getNumOperands() > 2)
 				            index = inst->getOperand(2);
-				        
 				        else{
 							index = inst->getOperand(1);
 				        }
@@ -459,7 +481,6 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
 						    }
 						}
 					}
-		        
 		            else if(structTy){
 				        auto size = structTy->getNumElements();
 				        auto &layout = M->getDataLayout();
@@ -467,7 +488,6 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
 				        llvm::Value* index;
 				        if(inst->getNumOperands() > 2)
 				            index = inst->getOperand(2);
-				        
 				        else{
 							index = inst->getOperand(1);
 				        }
@@ -523,19 +543,4 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
         }
     }
     errs() << GREEN << "Unsafe Seq Pointer After Value Range Analysis:\t\t" << DETAIL << heapUnsafeSeqPointerSet.size()<< NORMAL << "\n"; 
-
-    /*for (const auto &pair : heapUnsafeSeqPointerSet) {
-        const llvm::Value *key = pair.first;
-
-        // Use llvm::dyn_cast to cast the key to an Instruction
-        if (const llvm::Instruction *instruction = llvm::dyn_cast<llvm::Instruction>(key)) {
-            // Print the instruction using LLVM's print method
-            instruction->print(llvm::outs());
-            llvm::outs() << "\n";
-        } else {
-            std::cerr << "Key cannot be cast to LLVM Instruction." << std::endl;
-        }
-    }
-    */
-
 }

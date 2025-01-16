@@ -84,18 +84,15 @@ public:
       { }
 
   bool empty() const { return work.empty(); }
-
   bool contains(T elt) const { return inList.count(elt); }
 
-  void
-  add(T elt) {
+  void add(T elt) {
     if (!inList.count(elt)) {
       work.push_back(elt);
     }
   }
 
-  T
-  take() {
+  T take() {
     T front = work.front();
     work.pop_front();
     inList.erase(front);
@@ -393,9 +390,6 @@ public:
   }
 
 private:
-  // These property objects determine the behavior of the dataflow analysis.
-  // They should by replaced by concrete implementation classes on a per
-  // analysis basis.
   Meet meet;
   Transfer transfer;
 
@@ -407,9 +401,6 @@ private:
   void
   mergeInState(State& destination, const State& toMerge) {
     for (auto& valueStatePair : toMerge) {
-      // If an incoming Value has an AbstractValue in the already merged
-      // state, meet it with the new one. Otherwise, copy the new value over,
-      // implicitly meeting with bottom.
       auto [found, newlyAdded] = destination.insert(valueStatePair);
       if (!newlyAdded) {
         found->second = meet({found->second, valueStatePair.second});
