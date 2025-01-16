@@ -407,9 +407,10 @@ namespace
 			errs() << "\n";
 
 			// we're accessing the pointer at an offset != 0, classify it as SEQ
-			if (!(II->hasAllZeroIndices()))
+			if (!(II->hasAllZeroIndices())){
 				TheState.ClassifyPointerVariable(Ptr, UnifiedMemSafe::VariableStates::Seq);
-
+				TheState.ClassifyPointerVariable(II, UnifiedMemSafe::VariableStates::Seq);
+			}
 			// register the new variable and set size for resulting value
 			TheState.RegisterVariable(II);
 			if (II->getResultElementType()->isPointerTy()){
@@ -419,25 +420,50 @@ namespace
 			}
 			else{
 				// set size as originalPtr-offset
-				UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(Ptr);
+				Value* valoperand = Ptr; 
+				UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(valoperand);
 				//errs() << "\tvarinfo at " << varinfo << "\n ";
-				if (varinfo != NULL){
-					Value *otherSize = varinfo->size;
-					if (!(II->hasAllZeroIndices())){
-						Value *Offset = getOffsetForGEPInst(II);
-						if (varinfo->size->getType() != Offset->getType()){
-							errs() << RED << "!!! varinfo->size->getType() (" << *(varinfo->size->getType()) << ") != Offset->getType() (" << *(Offset->getType()) << ")\n"
-								<< NORMAL;
+			if (varinfo != NULL) {
+				Value *otherSize = varinfo->size;
+
+				// Check if the size is zero and fallback to DataLayout or array size
+				if (auto *constInt = dyn_cast<ConstantInt>(otherSize)) {
+					if (constInt->isZero()) {
+						// If size is 0, use DataLayout or the underlying array size
+						Type *elementType = II->getSourceElementType();
+						if (elementType->isArrayTy()) {
+							auto arrayType = cast<ArrayType>(elementType);
+							uint64_t arraySize = arrayType->getNumElements();
+							uint64_t elementSize = CurrentDL->getTypeAllocSize(arrayType->getElementType());
+							otherSize = ConstantInt::get(Type::getInt64Ty(II->getContext()), arraySize * elementSize);
+						} else {
+							// Fallback to DataLayout for other types
+							uint64_t typeSize = CurrentDL->getTypeAllocSize(elementType);
+							otherSize = ConstantInt::get(Type::getInt64Ty(II->getContext()), typeSize);
 						}
-						Constant *offset = dyn_cast_or_null<Constant>(Offset);
-						Constant *othersize = dyn_cast_or_null<Constant>(otherSize);
-						if (offset && othersize){
-							// Increment the offset of the resulting pointer, only for resulting pointer, base pointer stays the same.
-							otherSize= llvm::ConstantExpr::getSub(othersize, offset);
-						}
+						
+						// Use SetSizeForPointerVariable to update the size
+						TheState.SetSizeForPointerVariable(valoperand, otherSize);
 					}
-					TheState.SetSizeForPointerVariable(II, otherSize);
 				}
+
+				if (!(II->hasAllZeroIndices())) {
+					Value *Offset = getOffsetForGEPInst(II);
+					if (varinfo->size->getType() != Offset->getType()) {
+						errs() << RED << "!!! varinfo->size->getType() (" << *(varinfo->size->getType()) << ") != Offset->getType() (" << *(Offset->getType()) << ")\n"
+							<< NORMAL;
+					}
+					Constant *offset = dyn_cast_or_null<Constant>(Offset);
+					Constant *othersize = dyn_cast_or_null<Constant>(otherSize);
+					if (offset && othersize) {
+						errs() << "varinfosize: " << *varinfo->size << "\n";
+						errs() << "othersize: " << *othersize << "\n";
+						// Increment the offset of the resulting pointer, only for resulting pointer, base pointer stays the same.
+						otherSize = llvm::ConstantExpr::getSub(othersize, offset);
+					}
+				}
+				TheState.SetSizeForPointerVariable(II, otherSize);
+			}
 			}
 			return true;
 		}
@@ -951,6 +977,7 @@ namespace
 			// 5) Print stats (and do your final steps)
 			printStats();
 
+			
 			UnifiedMemSafe::Uriah::identifyDifferentKindsOfUnsafeHeapPointers(
 				heapPointerSet,
 				TheState,
