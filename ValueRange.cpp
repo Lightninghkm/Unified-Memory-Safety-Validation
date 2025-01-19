@@ -791,6 +791,8 @@ void valueRangeAnalysis(Module *M,
 
                                 if(rangeValue.rvalue && rangeValue.rvalue->uge(size)){
                                     DEBUG_PRINT("Array index range exceeds allocated size through retriving the constant value of the variable index. Marking as unsafe.");
+                                    DEBUG_PRINT("Max variable index: " << *rangeValue.rvalue);
+                                    DEBUG_PRINT("Max access range of the variable index: " << (int64_t)rangeValue.rvalue->getValue().getLimitedValue()*elmtBytes);
                                     auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
                                     if (vmkt) {
                                         if (TheState.GetPointerVariableInfo(vmkt) != NULL){
