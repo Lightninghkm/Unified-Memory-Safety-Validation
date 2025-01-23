@@ -502,8 +502,6 @@ namespace
 				}
 			}
 			else{
-				errs() << "Operand of Load instruction is not a Ptr!\n";
-				errs() << "Operand Type: " << *(II->getType()) << "\n";
 			}
 			return true;
 		}
@@ -565,15 +563,13 @@ namespace
 				if (!(II->hasAllZeroIndices())) {
 					Value *Offset = getOffsetForGEPInst(II);
 					if (varinfo->size->getType() != Offset->getType()) {
-						errs() << RED << "!!! varinfo->size->getType() (" << *(varinfo->size->getType()) << ") != Offset->getType() (" << *(Offset->getType()) << ")\n"
+						errs() << RED << "\t!!! varinfo->size->getType() (" << *(varinfo->size->getType()) << ") != Offset->getType() (" << *(Offset->getType()) << ")\n"
 							<< NORMAL;
+						errs() << GREEN <<"\t Converting Offset and calculating new size\n" << NORMAL; 
 					}
 					Constant *offset = dyn_cast_or_null<Constant>(Offset);
 					Constant *othersize = dyn_cast_or_null<Constant>(otherSize);
 					if (offset && othersize) {
-						errs() << "varinfosize: " << *varinfo->size << "\n";
-						errs() << "othersize: " << *othersize << "\n";
-						errs() << "offset: " << *offset << "\n";
 						// Increment the offset of the resulting pointer, only for resulting pointer, base pointer stays the same.
 						otherSize = llvm::ConstantExpr::getSub(othersize, offset);
 					}
@@ -608,7 +604,7 @@ namespace
 			// Attempt to retrieve pointer info for the operand
 			UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(II->getOperand(0));
 			if (!varinfo) {
-				errs() << "PointerVariableInfo not found for operand: " << *(II->getOperand(0)) << "\n";
+				errs() << "\tPointerVariableInfo not found for operand: " << *(II->getOperand(0)) << "\n\tCreating and Recheck\n";
 				// --- FIX: if the operand is a pointer, create a VariableInfo now ---
 				if (II->getOperand(0)->getType()->isPointerTy()) {
 					varinfo = TheState.SetSizeForPointerVariable(II->getOperand(0),
@@ -647,7 +643,7 @@ namespace
 					processCallOperand(II, varinfo);
 				}
 				else {
-					errs() << "=> Ignored classification of variable since we have no operand\n";
+					errs() << "\tIgnored classification of variable since we have no operand\n";
 				}
 
 				// Propagate size metadata from the operand to the cast
