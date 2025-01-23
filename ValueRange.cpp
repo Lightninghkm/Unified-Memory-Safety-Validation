@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
- 
+
 #include "llvm/ADT/APSInt.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/IR/CallSite.h"
@@ -191,24 +191,24 @@ public:
 
             if (opcode == Instruction::Add) {
                 bool ofl, ofr;
-                auto l = l1.sadd_ov(l2, ofl);
-                auto r = r1.sadd_ov(r2, ofr);
+                auto ll = l1.sadd_ov(l2, ofl);
+                auto rr = r1.sadd_ov(r2, ofr);
                 if (ofl || ofr) {
                     return infRange();
                 }
                 else {
-                    return makeRange(context, l, r);
+                    return makeRange(context, ll, rr);
                 }
             }
             else if (opcode == Instruction::Sub) {
                 bool ofl, ofr;
-                auto l = l1.ssub_ov(r2, ofl);
-                auto r = r1.ssub_ov(l2, ofr);
+                auto ll = l1.ssub_ov(r2, ofl);
+                auto rr = r1.ssub_ov(l2, ofr);
                 if (ofl || ofr) {
                     return infRange();
                 }
                 else {
-                    return makeRange(context, l, r);
+                    return makeRange(context, ll, rr);
                 }
             }
             else if (opcode == Instruction::Mul) {
@@ -223,29 +223,29 @@ public:
                         return infRange();
                     }
                 }
-                auto max = candidates[0];
+                auto mx = candidates[0];
                 for (auto &x : candidates) {
-                    if (x.sgt(max)) {
-                        max = x;
+                    if (x.sgt(mx)) {
+                        mx = x;
                     }
                 }
-                auto min = candidates[0];
+                auto mn = candidates[0];
                 for (auto &x : candidates) {
-                    if (x.slt(min)) {
-                        min = x;
+                    if (x.slt(mn)) {
+                        mn = x;
                     }
                 }
-                return makeRange(context, min, max);
+                return makeRange(context, mn, mx);
             }
             else if (opcode == Instruction::SDiv) {
                 if (l2.isNegative() && r2.isStrictlyPositive()) {
                     auto abs1 = l1.abs();
                     auto abs2 = r1.abs();
                     auto abs = abs1.sgt(abs2) ? abs1 : abs2;
-                    APInt l(abs);
-                    l.flipAllBits();
-                    ++l;
-                    return makeRange(context, l, abs);
+                    APInt ll(abs);
+                    ll.flipAllBits();
+                    ++ll;
+                    return makeRange(context, ll, abs);
                 }
                 else {
                     SmallVector<APInt, 4> candidates;
@@ -259,25 +259,25 @@ public:
                             return infRange();
                         }
                     }
-                    auto max = candidates[0];
-                    for (auto &x : candidates) {
-                        if (x.sgt(max)) {
-                            max = x;
+                    auto mx = candidates[0];
+                    for (auto &xx : candidates) {
+                        if (xx.sgt(mx)) {
+                            mx = xx;
                         }
                     }
-                    auto min = candidates[0];
-                    for (auto &x : candidates) {
-                        if (x.slt(min)) {
-                            min = x;
+                    auto mn = candidates[0];
+                    for (auto &xx : candidates) {
+                        if (xx.slt(mn)) {
+                            mn = xx;
                         }
                     }
-                    return makeRange(context, min, max);
+                    return makeRange(context, mn, mx);
                 }
             }
             else if (opcode == Instruction::UDiv) {
-                auto l = r1.udiv(l2);
-                auto r = l1.udiv(r2);
-                return makeRange(context, l, r);
+                auto ll = r1.udiv(l2);
+                auto rr = l1.udiv(r2);
+                return makeRange(context, ll, rr);
             }
             else {
                 // todo: fill in
@@ -333,7 +333,7 @@ public:
 
     void
     operator()(llvm::Value &i, RangeState &state) {
-        
+
         if (auto *constant = llvm::dyn_cast<llvm::ConstantInt>(&i)) {
             RangeValue r;
             r.kind = PossibleRangeValues::constant;
@@ -355,7 +355,7 @@ public:
 void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo>heapSeqPointerSet, UnifiedMemSafe::AnalysisState TheState){
     // I removed the print messages for cleanness in this pass
     // If you want to print, e.g., declaration and use sites, please refer to DataGuard Repository for the statements
-	auto *mainFunction = M->getFunction("main");
+    auto *mainFunction = M->getFunction("main");
     if (!mainFunction) {
        errs() << RED << "Unable to find main function for Value-Range Analysis! Skipping!\n" << NORMAL;
        return;
@@ -378,17 +378,22 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                     continue;
                 }
                 if (heapSeqPointerSet.find(inst) != heapSeqPointerSet.end()){
-		            auto &state = analysis::getIncomingState(rangeStates, *inst);
-		            Type *type = cast<PointerType>(
-		                    cast<GetElementPtrInst>(inst)->getPointerOperandType())->getElementType();
-		            auto pointerTy = dyn_cast_or_null<PointerType>(type);
-		            auto arrayTy = dyn_cast_or_null<ArrayType>(type);
-		            auto structTy = dyn_cast_or_null<StructType>(type);
-		            
-					if(!arrayTy && !structTy){
+                    auto &state = analysis::getIncomingState(rangeStates, *inst);
+                    Type *type = cast<PointerType>(
+                            cast<GetElementPtrInst>(inst)->getPointerOperandType())->getElementType();
+                    auto pointerTy = dyn_cast_or_null<PointerType>(type);
+                    auto arrayTy = dyn_cast_or_null<ArrayType>(type);
+                    auto structTy = dyn_cast_or_null<StructType>(type);
+                    
+                    if(!arrayTy && !structTy){
                         if(UnifiedMemSafe::VariableMapKeyType *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)){
+                            // Check if vmktinfo is non-null
                             if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                 UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
+                                if(!vmktinfo){
+                                    // vmktinfo is NULL
+                                    continue;
+                                }
                                 if (auto *gepInst = dyn_cast<llvm::GetElementPtrInst>(inst)) {
                                     // Check the number of operands in the GEP instruction
                                     auto index = (gepInst->getNumOperands() > 2) 
@@ -398,7 +403,12 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                                     auto constant = dyn_cast<ConstantInt>(index);
                                     if (constant) {
                                         // If the offset is constant
-                                        int underlyingSize = dyn_cast<ConstantInt>(vmktinfo->size)->getSExtValue();
+                                        auto *sizeCI = dyn_cast<ConstantInt>(vmktinfo->size);
+                                        if(!sizeCI) {
+                                            // vmktinfo->size is not a ConstantInt
+                                            continue;
+                                        }
+                                        int underlyingSize = sizeCI->getSExtValue();
                                         if (!constant->isNegative() && underlyingSize > 0) {
                                             // Offset is within bounds, discard this case
                                             continue;
@@ -414,68 +424,65 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                             }
                         }
                         continue;
-		            }
-		            
-		            
-		            else if(arrayTy){
-						auto size = arrayTy->getNumElements();
-						auto elmtTy = arrayTy->getElementType();
-						auto &layout = M->getDataLayout();
-						auto numBytes = layout.getTypeAllocSize(arrayTy);
-						auto elmtBytes = layout.getTypeAllocSize(elmtTy);
-				        llvm::Value* index;
-				        if(inst->getNumOperands() > 2)
-				            index = inst->getOperand(2);
-				        
-				        else{
-							index = inst->getOperand(1);
-				        }
-						auto constant = dyn_cast<ConstantInt>(index);
-						if (constant) {
-						    if (!constant->isNegative() && !constant->uge(size)) {
-				                if (numBytes >= ((int64_t) constant->getValue().getLimitedValue() * elmtBytes)){}
-				                else{
+                    }
+                    else if(arrayTy){
+                        auto size = arrayTy->getNumElements();
+                        auto elmtTy = arrayTy->getElementType();
+                        auto &layout = M->getDataLayout();
+                        auto numBytes = layout.getTypeAllocSize(arrayTy);
+                        auto elmtBytes = layout.getTypeAllocSize(elmtTy);
+                        llvm::Value* index;
+                        if(inst->getNumOperands() > 2)
+                            index = inst->getOperand(2);
+                        else {
+                            index = inst->getOperand(1);
+                        }
+                        auto constant = dyn_cast<ConstantInt>(index);
+                        if (constant) {
+                            if (!constant->isNegative() && !constant->uge(size)) {
+                                if (numBytes >= ((int64_t) constant->getValue().getLimitedValue() * elmtBytes)){}
+                                else {
                                     if(UnifiedMemSafe::VariableMapKeyType *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)){
-								        if (TheState.GetPointerVariableInfo(vmkt) != NULL){
+                                        if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                             UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
                                             heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
                                         }
                                     }
                                 }
-						    }
-						}
-						else {
-						    auto &rangeValue = state[index];
-						    if (rangeValue.isUnknown() ||
-						        rangeValue.isInfinity() ||
-						        rangeValue.lvalue->isNegative() ||
-						        rangeValue.rvalue->uge(size)) {
+                            }
+                        }
+                        else {
+                            auto &rangeValue = state[index];
+                            if (rangeValue.isUnknown() ||
+                                rangeValue.isInfinity() ||
+                                !rangeValue.lvalue || !rangeValue.rvalue || 
+                                rangeValue.lvalue->isNegative() ||
+                                rangeValue.rvalue->uge(size)) {
                                 if(UnifiedMemSafe::VariableMapKeyType *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)){
                                     if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                         UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
                                         heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
                                     }
                                 }
-						    }
-						}
-					}
-		        
-		            else if(structTy){
-				        auto size = structTy->getNumElements();
-				        auto &layout = M->getDataLayout();
-				        auto numBytes = layout.getTypeAllocSize(structTy);
-				        llvm::Value* index;
-				        if(inst->getNumOperands() > 2)
-				            index = inst->getOperand(2);
-				        
-				        else{
-							index = inst->getOperand(1);
-				        }
-				        
-				        const llvm::StructLayout* structureLayout = layout.getStructLayout(structTy);
-				        auto constant = dyn_cast<ConstantInt>(index);
-				        if (constant) {
-				        	auto intIndex = (uint64_t)constant->getValue().getLimitedValue();
+                            }
+                        }
+                    }
+                    
+                    else if(structTy){
+                        auto size = structTy->getNumElements();
+                        auto &layout = M->getDataLayout();
+                        auto numBytes = layout.getTypeAllocSize(structTy);
+                        llvm::Value* index;
+                        if(inst->getNumOperands() > 2)
+                            index = inst->getOperand(2);
+                        else {
+                            index = inst->getOperand(1);
+                        }
+                        
+                        const llvm::StructLayout* structureLayout = layout.getStructLayout(structTy);
+                        auto constant = dyn_cast<ConstantInt>(index);
+                        if (constant) {
+                            auto intIndex = (uint64_t)constant->getValue().getLimitedValue();
                             if(intIndex < size){
                                 auto offset = structureLayout->getElementOffset(intIndex);
                                 if (!constant->isNegative() && !constant->uge(size)) {
@@ -489,7 +496,7 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                                         }
                                     } 
                                 }  
-				            }
+                            }
                             else{
                                 if(UnifiedMemSafe::VariableMapKeyType *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)){
                                     if (TheState.GetPointerVariableInfo(vmkt) != NULL){
@@ -498,27 +505,29 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
                                     }
                                 }
                             }
-				        }
-				        else {
-				            auto &rangeValue = state[index];
-				            if (rangeValue.isUnknown() ||
-				                rangeValue.isInfinity() ||
-				                rangeValue.lvalue->isNegative() ||
-				                rangeValue.rvalue->uge(size)) {
-				                if (rangeValue.isInfinity() || rangeValue.isUnknown()) {
+                        }
+                        else {
+                            auto &rangeValue = state[index];
+                            if (rangeValue.isUnknown() ||
+                                rangeValue.isInfinity() ||
+                                !rangeValue.lvalue || !rangeValue.rvalue ||
+                                rangeValue.lvalue->isNegative() ||
+                                rangeValue.rvalue->uge(size)) {
+                                if (rangeValue.isInfinity() || rangeValue.isUnknown()) {
                                     if(UnifiedMemSafe::VariableMapKeyType *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)){
-								        if (TheState.GetPointerVariableInfo(vmkt) != NULL){
+                                        if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                             UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
                                             heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
                                         }
                                     }
-				                }
-				            }
-				        }
-				    }
+                                }
+                            }
+                        }
+                    }
                     else{
-		            }
-				}           
+                        // Additional processing can be added here.
+                    }
+                }           
             }
         }
     }
@@ -537,5 +546,4 @@ void valueRangeAnalysis(Module *M, std::map<const UnifiedMemSafe::VariableMapKey
         }
     }
     */
-
 }
