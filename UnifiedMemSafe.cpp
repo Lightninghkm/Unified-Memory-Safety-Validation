@@ -176,40 +176,144 @@ namespace
 		  return size;
 		}
 
-		Value *getOffsetForGEPInst(GetElementPtrInst *GEPInstr){
-			// Vector indices are not handled by ObjectOffsetSizeEvaluator (LLVM 6)
-			// TODO - Check if ObjectOffsetInstructionVisitor will work
-			if (!GEPInstr->getType()->isVectorTy()){
-				// if ObjSizeEval can directly calculate the offset for us, let's use that
-				SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(GEPInstr);
-				if (ObjSizeEval->knownOffset(SizeOffset)){
-					errs() << "\tUsing Offset from ObjSizeEval = " << *(SizeOffset.second) << "\n";
-					return SizeOffset.second;
-				}
-				// else, let's use the GEP functions
-				APInt Off(CurrentDL->getPointerTypeSizeInBits(GEPInstr->getType()), 0);
-				if (GEPInstr->accumulateConstantOffset(*CurrentDL, Off)){
-					errs() << "\tUsing Offset from GEP.accumulateConstantOffset() = " << Off << "\n";
-					return ConstantInt::get(MySizeType, Off);
+		Value *getOffsetForGEPInst(GetElementPtrInst *GEPInstr) {
+			// Quick helper: for a LoadInst of an alloca in the same function, 
+			// scan instructions up to that load, picking the last store of a constant.
+			// Returns -1 if not resolvable, else the constant.
+			auto getLastConstantStore = [&](LoadInst *L, AllocaInst *AI) -> int64_t {
+				// If load is in a different function from alloca, bail out
+				Function *LF = L->getFunction();
+				Function *AF = AI->getFunction();
+				if (LF != AF)
+					return -1;
+
+				// Track the last constant store we see (in textual order) before the load
+				StoreInst *lastStore = nullptr;
+				bool foundLoad = false;
+
+				// We do a simple top-down scan of instructions in the function
+				// until we reach the load in question.
+				for (BasicBlock &BB : *LF) {
+					for (Instruction &Inst : BB) {
+						// If we’ve just hit the load in question, stop scanning
+						if (&Inst == L) {
+							foundLoad = true;
+							break;
+						}
+						// If this is a StoreInst to AI, record it
+						if (auto *SI = dyn_cast<StoreInst>(&Inst)) {
+							if (SI->getPointerOperand() == AI) {
+								lastStore = SI;
+							}
+						}
+					}
+					if (foundLoad) 
+						break;
 				}
 
-				// as a last resort, let's infer it manually
-				uint64_t typeStoreSize = CurrentDL->getTypeStoreSize(GEPInstr->getResultElementType());
-				errs() << "\tSize of type of Ptr = " << typeStoreSize << "\n";
-				// Note: the following indexing used to be GEPInstr->getOperand(1), but now it should be more accurate
-				if (Constant *Idx = dyn_cast_or_null<Constant>(GEPInstr->getOperand(GEPInstr->getNumIndices()))){
-					Constant *Size = ConstantInt::get(MySizeType, typeStoreSize);
-					Value *Offset = llvm::ConstantExpr::getMul(Idx, Size);
-					errs() << "\tUsing Offset from manual evaluation = " << *Offset << "\n";
-					return Offset;
+				// If we found a last store, check if it stores a ConstantInt
+				if (lastStore) {
+					if (ConstantInt *cst = dyn_cast<ConstantInt>(lastStore->getValueOperand())) {
+						return cst->getSExtValue();
+					}
 				}
-				else
-					return UnknownSizeConstInt;
-			}
-			else{
+				return -1;
+			};
+
+			// Helper to see if an alloca has a single integer constant store or to pick the "last" one
+			// We first see if there's a single store. If not, we pick the textual last store in the same function.
+			auto resolveAllocaStore = [&](LoadInst *L, AllocaInst *AI) -> int64_t {
+				// Step A: Try to detect if there's exactly one store overall
+				// and it's a constant. If so, return it. If there's more than one,
+				// we do the textual "last store" approach.
+				StoreInst *uniqueStore = nullptr;
+				for (User *U : AI->users()) {
+					if (StoreInst *SI = dyn_cast<StoreInst>(U)) {
+						if (uniqueStore && uniqueStore != SI) {
+							// more than one store -> break
+							uniqueStore = nullptr;
+							break;
+						}
+						uniqueStore = SI;
+					}
+				}
+				// If exactly one store was found, see if it’s a constant int
+				if (uniqueStore) {
+					if (uniqueStore->getPointerOperand() == AI) {
+						if (ConstantInt *storeC = dyn_cast<ConstantInt>(uniqueStore->getValueOperand())) {
+							return storeC->getSExtValue(); 
+						}
+					}
+				}
+
+				// Step B: If there’s either multiple stores or the single store isn’t constant,
+				// we pick the last store *in textual order* before the load in the same function.
+				return getLastConstantStore(L, AI);
+			};
+
+			// Recursively peel away casts and try to resolve a single constant integer
+			std::function<int64_t(Value *)> resolveConstantIndex = [&](Value *V) -> int64_t {
+				// Case 1: Direct constant int
+				if (auto *CI = dyn_cast<ConstantInt>(V))
+					return CI->getSExtValue();
+
+				// Case 2: A load from an alloca (possibly with multiple stores)
+				if (auto *LI = dyn_cast<LoadInst>(V)) {
+					if (auto *AI = dyn_cast<AllocaInst>(LI->getPointerOperand())) {
+						return resolveAllocaStore(LI, AI);
+					}
+				}
+
+				// Case 3: Some kind of cast instruction (sext, zext, trunc, bitcast, etc.)
+				if (auto *castI = dyn_cast<CastInst>(V)) {
+					return resolveConstantIndex(castI->getOperand(0));
+				}
+
+				// Otherwise, not resolvable
+				return -1;
+			};
+
+			// 0) Bail out if it’s a vector GEP
+			if (GEPInstr->getType()->isVectorTy()) {
 				return UnknownSizeConstInt;
 			}
+
+			// 1) Try ObjSizeEval
+			SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(GEPInstr);
+			if (ObjSizeEval->knownOffset(SizeOffset)) {
+				errs() << "\tUsing Offset from ObjSizeEval = " << *(SizeOffset.second) << "\n";
+				return SizeOffset.second;
+			}
+
+			// 2) Try accumulateConstantOffset
+			APInt Off(CurrentDL->getPointerTypeSizeInBits(GEPInstr->getType()), 0);
+			if (GEPInstr->accumulateConstantOffset(*CurrentDL, Off)) {
+				errs() << "\tUsing Offset from GEP.accumulateConstantOffset() = " << Off << "\n";
+				return ConstantInt::get(MySizeType, Off);
+			}
+
+			// 3) Manual fallback
+			uint64_t typeStoreSize = CurrentDL->getTypeStoreSize(GEPInstr->getResultElementType());
+			errs() << "\tSize of type of Ptr = " << typeStoreSize << "\n";
+			uint64_t totalOffset = 0;
+
+			// Indices start at operand 1
+			for (unsigned i = 1; i < GEPInstr->getNumOperands(); ++i) {
+				Value *Idx = GEPInstr->getOperand(i);
+				int64_t cVal = resolveConstantIndex(Idx);
+				if (cVal == -1) {
+					errs() << "\tIndex " << i << " not a single constant. Returning unknown.\n";
+					return UnknownSizeConstInt;
+				}
+				errs() << "\tResolved index " << i << " to constant " << cVal << "\n";
+				totalOffset += (cVal * typeStoreSize);
+			}
+
+			Constant *OffsetConst = ConstantInt::get(MySizeType, totalOffset);
+			errs() << "\tUsing Offset from manual evaluation = " << *OffsetConst << "\n";
+			return OffsetConst;
 		}
+
 
 		// Helper 1 of processInstruction
 		// Logs the start of processing an instruction.
@@ -346,17 +450,24 @@ namespace
 			Value *valoperand = II->getValueOperand();
 			// propagate size metadata
 			if (!isa<Function>(valoperand))
-				errs() << "(~) " << *II << "\t" << DETAIL << " // {" << *valoperand << " -> " << *(II->getPointerOperand())
-					<< *(II->getPointerOperandType()) << " }" << NORMAL << "\n";
+				errs() << "(~) " << *II << "\t" << DETAIL << " // {" << *valoperand
+					<< " -> " << *(II->getPointerOperand()) << *(II->getPointerOperandType()) << " }" << NORMAL << "\n";
 			else
-				errs() << "(~) " << *II << "\t" << DETAIL << " // {" << ((Function *)valoperand)->getName() << " -> "
-					<< *(II->getPointerOperand()) << " }" << NORMAL << "\n";
+				errs() << "(~) " << *II << "\t" << DETAIL << " // {" << ((Function *)valoperand)->getName()
+					<< " -> " << *(II->getPointerOperand()) << " }" << NORMAL << "\n";
 
+			// If we're storing a pointer, propagate its size to the pointer-typed location
 			if (valoperand->getType()->isPointerTy()) {
 				UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(valoperand);
 
-				if (!varinfo && isa<Constant>(valoperand))
+				// --- FIX: if the pointer hasn't been registered, do it now ---
+				if (!varinfo && isa<Constant>(valoperand)) {
 					varinfo = TheState.SetSizeForPointerVariable(valoperand, getSizeForValue(valoperand));
+				}
+				else if (!varinfo) {
+					// Even if it's not a constant, attempt a fallback
+					varinfo = TheState.SetSizeForPointerVariable(valoperand, getSizeForValue(valoperand));
+				}
 
 				if (varinfo != NULL) {
 					TheState.ClassifyPointerVariable(II->getPointerOperand(), varinfo->classification);
@@ -365,6 +476,7 @@ namespace
 			}
 			return true;
 		}
+
 
 		// Helper 8 of processInstruction
 		// Processes a `LoadInst`.
@@ -376,7 +488,6 @@ namespace
 				Value *ptroperand = II->getPointerOperand();
 				UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(ptroperand);
 				//                errs()<<"The PTR Operand is: "<<*ptroperand<<" and its classification is : ";
-
 				if (!varinfo && isa<Constant>(ptroperand))
 					varinfo = TheState.SetSizeForPointerVariable(ptroperand, getSizeForValue(ptroperand));
 				if (varinfo != NULL){
@@ -389,6 +500,8 @@ namespace
 					TheState.ClassifyPointerVariable(II, varinfo->classification);
 					TheState.SetSizeForPointerVariable(II, varinfo->size);
 				}
+			}
+			else{
 			}
 			return true;
 		}
@@ -450,8 +563,9 @@ namespace
 				if (!(II->hasAllZeroIndices())) {
 					Value *Offset = getOffsetForGEPInst(II);
 					if (varinfo->size->getType() != Offset->getType()) {
-						errs() << RED << "!!! varinfo->size->getType() (" << *(varinfo->size->getType()) << ") != Offset->getType() (" << *(Offset->getType()) << ")\n"
+						errs() << RED << "\t!!! varinfo->size->getType() (" << *(varinfo->size->getType()) << ") != Offset->getType() (" << *(Offset->getType()) << ")\n"
 							<< NORMAL;
+						errs() << GREEN <<"\t Converting Offset and calculating new size\n" << NORMAL; 
 					}
 					Constant *offset = dyn_cast_or_null<Constant>(Offset);
 					Constant *othersize = dyn_cast_or_null<Constant>(otherSize);
@@ -471,6 +585,7 @@ namespace
 		bool processCastInst(CastInst *II) {
 			if (!II)
 				return false;
+
 			// Log cast instruction details
 			logCastInstructionDetails(II);
 
@@ -481,23 +596,32 @@ namespace
 				errs() << "Invalid source or destination type for CastInst: " << *II << "\n";
 				return false;
 			}
-
 			if (!II->getOperand(0)) {
-    			errs() << "Null operand for instruction: " << *II << "\n";
-    			return false;
-			}
-
-			UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(II->getOperand(0));
-			if (!varinfo) {
-				errs() << "PointerVariableInfo not found for operand: " << II->getOperand(0)<< "\n";
+				errs() << "Null operand for instruction: " << *II << "\n";
 				return false;
 			}
+
+			// Attempt to retrieve pointer info for the operand
+			UnifiedMemSafe::VariableInfo *varinfo = TheState.GetPointerVariableInfo(II->getOperand(0));
+			if (!varinfo) {
+				errs() << "\tPointerVariableInfo not found for operand: " << *(II->getOperand(0)) << "\n\tCreating and Recheck\n";
+				// --- FIX: if the operand is a pointer, create a VariableInfo now ---
+				if (II->getOperand(0)->getType()->isPointerTy()) {
+					varinfo = TheState.SetSizeForPointerVariable(II->getOperand(0),
+																getSizeForValue(II->getOperand(0)));
+				}
+				// If still no varinfo, bail out
+				if (!varinfo)
+					return false;
+			}
+
 			Type *innerSrcT = unwrapPointer(srcT);
 			Type *innerDstT = unwrapPointer(dstT);
 
 			if (isCastOfInterest(srcT, dstT, innerSrcT, innerDstT)) {
 				errs() << *II << "  Cast of Interest!\n";
 
+				// If the source isn't a pointer type, handle integer-based casts
 				if (!srcT->isPointerTy()) {
 					if (isa<ZExtInst>(II) || isa<SExtInst>(II) || isa<TruncInst>(II)) {
 						classifyExtOrTruncInst(cast<UnaryInstruction>(II));
@@ -508,22 +632,27 @@ namespace
 				// Handle various operand types for the cast
 				if (LoadInst *III = dyn_cast_or_null<LoadInst>(II->getOperand(0))) {
 					processLoadOperand(II, III, innerSrcT, innerDstT);
-				} else if (GetElementPtrInst *III = dyn_cast_or_null<GetElementPtrInst>(II->getOperand(0))) {
+				}
+				else if (GetElementPtrInst *III = dyn_cast_or_null<GetElementPtrInst>(II->getOperand(0))) {
 					processGEPOperand(II, III, innerSrcT, innerDstT);
-				} else if (CastInst *CInst = dyn_cast_or_null<CastInst>(II->getOperand(0))) {
+				}
+				else if (CastInst *CInst = dyn_cast_or_null<CastInst>(II->getOperand(0))) {
 					processCastOperand(II, CInst, innerSrcT, innerDstT);
-				} else if (isa<CallInst>(II->getOperand(0))) {
+				}
+				else if (isa<CallInst>(II->getOperand(0))) {
 					processCallOperand(II, varinfo);
-				} else {
-					errs() << "=> Ignored classification of variable since we have no operand\n";
+				}
+				else {
+					errs() << "\tIgnored classification of variable since we have no operand\n";
 				}
 
-				// Propagate size metadata
+				// Propagate size metadata from the operand to the cast
 				propagateSizeMetadata(II, varinfo);
 			}
 
 			return true;
 		}
+
 
 		// Logs the details of the cast instruction
 		void logCastInstructionDetails(CastInst *II) {
