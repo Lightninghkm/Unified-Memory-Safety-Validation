@@ -652,6 +652,12 @@ void valueRangeAnalysis(Module *M,
                         if(vmkt){
                             if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                 UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
+                                // Additional safety check for vmktinfo
+                                if(!vmktinfo) {
+                                    DEBUG_PRINT("vmktinfo is NULL; skipping analysis.");
+                                    continue;
+                                }
+
                                 if (auto *gepInst = dyn_cast<llvm::GetElementPtrInst>(inst)) {
                                     auto index = (gepInst->getNumOperands() > 2) 
                                                 ? gepInst->getOperand(2)
@@ -706,9 +712,16 @@ void valueRangeAnalysis(Module *M,
                                     }
 
                                     if (constant) {
-                                        int underlyingSize = dyn_cast<ConstantInt>(vmktinfo->size)->getSExtValue();
+                                        // === Added check for vmktinfo->size ===
+                                        auto *sizeCI = dyn_cast<ConstantInt>(vmktinfo->size);
+                                        if(!sizeCI) {
+                                            DEBUG_PRINT("vmktinfo->size is not a ConstantInt. Skipping analysis.");
+                                            continue;
+                                        }
+                                        int underlyingSize = sizeCI->getSExtValue();
+
                                         DEBUG_PRINT("Index is a constant: " << constant->getSExtValue() 
-                                               << ", Underlying size: " << underlyingSize);
+                                                   << ", Underlying size: " << underlyingSize);
                                         if (!constant->isNegative() && underlyingSize > 0) {
                                             DEBUG_PRINT("Index is within valid range. Continuing.");
                                             continue;
@@ -1068,3 +1081,4 @@ void valueRangeAnalysis(Module *M,
         }
     }
 }
+
