@@ -270,7 +270,7 @@ public:
 
       // Merge the state coming in from all predecessors
       auto state = mergeStateFromPredecessors(bb, results);
-      mergeInState(state, results[&f]);
+      //mergeInState(state, results[&f]);
 
       // If we have already processed the block and no changes have been made to
       // the abstract input, we can skip processing the block. Otherwise, save

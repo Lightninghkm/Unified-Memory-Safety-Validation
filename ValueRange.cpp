@@ -776,6 +776,8 @@ void valueRangeAnalysis(Module *M,
                             DEBUG_PRINT("Array index is a constant: " << constant->getSExtValue());
                             if (!constant->isNegative() && !constant->uge(size)) {
                                 if (numBytes >= ((int64_t) constant->getValue().getLimitedValue() * elmtBytes)){
+                                    DEBUG_PRINT("Array size in terms of number of elements: "<< numBytes/elmtBytes);
+                                    DEBUG_PRINT("Array total size: "<< numBytes);
                                     DEBUG_PRINT("Array index within bounds. Safe access.");
                                 }
                                 else{
@@ -803,34 +805,92 @@ void valueRangeAnalysis(Module *M,
                             }
                         }
                         else {
+                            // `index` is not a literal ConstantInt in the IR, so we look up its range:
                             auto it = state.find(index);
                             if (it != state.end()) {
                                 auto &rangeValue = it->second;
-                                DEBUG_PRINT("Array index is not a constant. Range kind: " 
+                                DEBUG_PRINT("Array index is not a compile-time constant. Range kind: "
                                             << static_cast<int>(rangeValue.kind));
+
+                                // 1) Handle unknown, infinite, or negative-lower-bound ranges
                                 if (rangeValue.isUnknown() ||
                                     rangeValue.isInfinity() ||
                                     (rangeValue.lvalue && rangeValue.lvalue->isNegative())) {
-                                    DEBUG_PRINT("Array index range is unsafe. Marking as unsafe.");
+                                    DEBUG_PRINT("Array index range is indeed not a constant. Marking as unsafe.");
                                     auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
                                     if (vmkt) {
-                                        if (TheState.GetPointerVariableInfo(vmkt) != NULL){
-                                            UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
+                                        if (TheState.GetPointerVariableInfo(vmkt) != NULL) {
+                                            UnifiedMemSafe::VariableInfo *vmktinfo =
+                                                TheState.GetPointerVariableInfo(vmkt);
                                             heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                             DEBUG_PRINT("Pointer marked as unsafe.");
                                         }
                                     }
                                 }
+                                // 2) If the dataflow says it's a constant range, explicitly check bounds
+                                else if (rangeValue.isConstant()) {
+                                    DEBUG_PRINT("DataFlow analysis suggests that the variable index can be retrieved as constant.");
+                                    // Unify bitwidth to 64 before extracting
+                                    int64_t loVal = rangeValue.lvalue
+                                        ? rangeValue.lvalue->getValue().sextOrTrunc(64).getSExtValue()
+                                        : 0;
+                                    int64_t hiVal = rangeValue.rvalue
+                                        ? rangeValue.rvalue->getValue().sextOrTrunc(64).getSExtValue()
+                                        : 0;
 
-                                if(rangeValue.rvalue && rangeValue.rvalue->uge(size)){
-                                    DEBUG_PRINT("Array index range exceeds allocated size through retriving the constant value of the variable index. Marking as unsafe.");
+                                    if (loVal < 0) {
+                                        // Negative index => unsafe
+                                        DEBUG_PRINT("Array index range has negative lower bound. Marking as unsafe.");
+                                        auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
+                                        if (vmkt) {
+                                            if (TheState.GetPointerVariableInfo(vmkt) != NULL) {
+                                                UnifiedMemSafe::VariableInfo *vmktinfo =
+                                                    TheState.GetPointerVariableInfo(vmkt);
+                                                heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
+                                                DEBUG_PRINT("Pointer marked as unsafe.");
+                                            }
+                                        }
+                                    }
+                                    else if (hiVal >= static_cast<int64_t>(size)) {
+                                        // Upper bound beyond the array dimension => unsafe
+                                        DEBUG_PRINT("Array index range may exceed allocated elements. Marking as unsafe.");
+                                        auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
+                                        if (vmkt) {
+                                            if (TheState.GetPointerVariableInfo(vmkt) != NULL) {
+                                                UnifiedMemSafe::VariableInfo *vmktinfo =
+                                                    TheState.GetPointerVariableInfo(vmkt);
+                                                heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
+                                                DEBUG_PRINT("Pointer marked as unsafe.");
+                                            }
+                                        }
+                                    }
+                                    else {
+                                        // Entire [loVal, hiVal] is within [0, size - 1]
+                                        int64_t loVal = rangeValue.lvalue
+                                            ? rangeValue.lvalue->getValue().sextOrTrunc(64).getSExtValue()
+                                            : 0;
+                                        int64_t hiVal = rangeValue.rvalue
+                                            ? rangeValue.rvalue->getValue().sextOrTrunc(64).getSExtValue()
+                                            : 0;
+                                        DEBUG_PRINT("Array index constant range is [" << loVal <<", " 
+                                                    << hiVal << "], within the array size: " << size <<". Safe access.");
+                                    }
+                                }
+
+                                // 3) Existing check if upper bound is explicitly >= size
+                                //    (sometimes used when rvalue alone indicates out-of-bounds)
+                                if (rangeValue.rvalue && rangeValue.rvalue->uge(size)) {
+                                    DEBUG_PRINT("Array index range exceeds allocated size through "
+                                                "retrieving the constant value of the variable index. "
+                                                "Marking as unsafe.");
                                     DEBUG_PRINT("Max variable index: " << *rangeValue.rvalue);
-                                    DEBUG_PRINT("Max access range of the variable index: " 
-                                                << (int64_t)rangeValue.rvalue->getValue().getLimitedValue()*elmtBytes);
+                                    DEBUG_PRINT("Max access range of the variable index: "
+                                                << (int64_t)rangeValue.rvalue->getValue().getLimitedValue() * elmtBytes);
                                     auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
                                     if (vmkt) {
-                                        if (TheState.GetPointerVariableInfo(vmkt) != NULL){
-                                            UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
+                                        if (TheState.GetPointerVariableInfo(vmkt) != NULL) {
+                                            UnifiedMemSafe::VariableInfo *vmktinfo =
+                                                TheState.GetPointerVariableInfo(vmkt);
                                             heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                             DEBUG_PRINT("Pointer marked as unsafe.");
                                         }
@@ -838,6 +898,7 @@ void valueRangeAnalysis(Module *M,
                                 }
                             }
                             else {
+                                // If we have no dataflow info about this index, mark unsafe as fallback.
                                 DEBUG_PRINT("Array index range not found in state. Marking as unsafe.");
                                 auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
                                 if (vmkt) {
@@ -945,6 +1006,7 @@ void valueRangeAnalysis(Module *M,
                             if(intIndex < size){
                                 auto offset = structureLayout->getElementOffset(intIndex);
                                 DEBUG_PRINT("Struct element offset: " << offset);
+                                DEBUG_PRINT("Struct total size: " << numBytes);
                                 if (!constant->isNegative() && intIndex < size) {
                                     if (numBytes >= offset + layout.getTypeAllocSize(structTy->getElementType(intIndex))){
                                         DEBUG_PRINT("Struct index within bounds based on offset. Safe access.");
