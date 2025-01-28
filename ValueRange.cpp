@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
- 
+
 #include "llvm/ADT/APSInt.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/IR/CallSite.h"
@@ -43,13 +43,12 @@
 #include "program-dependence-graph/include/PTAWrapper.hh"
 #include "program-dependence-graph/include/Graph.hh"
 #include "program-dependence-graph/include/PDGEnums.hh"
-#include "ProgramDependencyGraph.hh" 
+#include "ProgramDependencyGraph.hh"
 
 #include "llvm/Support/CommandLine.h"
 
 static llvm::cl::opt<bool> EnableDebug("enable-debug", llvm::cl::desc("Enable debug output"), llvm::cl::init(false));
 #define DEBUG_PRINT(x) if (EnableDebug) { llvm::errs() << x << "\n"; };
-
 
 using namespace llvm;
 using std::string;
@@ -110,7 +109,26 @@ struct RangeValue {
     bool isInfinity() const { return kind == PossibleRangeValues::infinity; }
     bool isConstant() const { return kind == PossibleRangeValues::constant; }
 
-    // The original operator|
+    // ----------------------------------------------------------------------
+    // We unify all APInt bit widths here to 64 bits before comparing or merging
+    // ----------------------------------------------------------------------
+
+    bool operator==(const RangeValue &other) const {
+        if (kind == PossibleRangeValues::constant &&
+            other.kind == PossibleRangeValues::constant) {
+            // Ensure both sides have the same bit width (64) before comparison
+            APInt selfL = lvalue->getValue().sextOrTrunc(64);
+            APInt selfR = rvalue->getValue().sextOrTrunc(64);
+            APInt otherL = other.lvalue->getValue().sextOrTrunc(64);
+            APInt otherR = other.rvalue->getValue().sextOrTrunc(64);
+            return selfL == otherL && selfR == otherR;
+        }
+        else {
+            return kind == other.kind;
+        }
+    }
+
+    // The original operator|, but we unify bit widths before any APInt operation:
     RangeValue operator|(const RangeValue &other) const {
         RangeValue r;
         if (isUnknown() || other.isUnknown()) {
@@ -126,10 +144,11 @@ struct RangeValue {
             r.kind = PossibleRangeValues::infinity;
             return r;
         } else {
-            auto &selfL = lvalue->getValue();
-            auto &selfR = rvalue->getValue();
-            auto &otherL = other.lvalue->getValue();
-            auto &otherR = other.rvalue->getValue();
+            // Unify to 64 bits
+            APInt selfL = lvalue->getValue().sextOrTrunc(64);
+            APInt selfR = rvalue->getValue().sextOrTrunc(64);
+            APInt otherL = other.lvalue->getValue().sextOrTrunc(64);
+            APInt otherR = other.rvalue->getValue().sextOrTrunc(64);
 
             r.kind = PossibleRangeValues::constant;
             if (selfL.slt(otherL)) {
@@ -149,8 +168,8 @@ struct RangeValue {
         }
         // bounding
         if (r.kind == PossibleRangeValues::constant && r.lvalue && r.rvalue) {
-            APInt L = r.lvalue->getValue();
-            APInt R = r.rvalue->getValue();
+            APInt L = r.lvalue->getValue().sextOrTrunc(64);
+            APInt R = r.rvalue->getValue().sextOrTrunc(64);
             APInt diff = (R.sgt(L) ? R - L : L - R);
             DEBUG_PRINT("Range difference: " << diff);
             if (diff.ugt(MAX_RANGE_SIZE)) {
@@ -162,23 +181,8 @@ struct RangeValue {
         }
         return r;
     }
-
-    bool operator==(const RangeValue &other) const {
-        if (kind == PossibleRangeValues::constant &&
-            other.kind == PossibleRangeValues::constant) {
-            auto &selfL = lvalue->getValue();
-            auto &selfR = rvalue->getValue();
-            auto &otherL = (other.lvalue)->getValue();
-            auto &otherR = (other.rvalue)->getValue();
-            return selfL == otherL && selfR == otherR;
-        }
-        else {
-            return kind == other.kind;
-        }
-    }
 };
 
-// Updated makeRange to take APInt by value
 RangeValue makeRange(LLVMContext &context, APInt left, APInt right) {
     RangeValue r;
     r.kind   = PossibleRangeValues::constant;
@@ -234,9 +238,8 @@ public:
         {
             uint64_t sz = 0;
             if (isKnownMallocCall(&I, sz)) {
-                // Assuming the result of malloc is stored to a variable, which should be handled by handleStore
-                // If malloc's result is used directly, handle accordingly
-                // Here, do not store it directly in the state
+                // We do not directly store it into the state here;
+                // usually it's stored to a variable. handleStore sees it.
                 DEBUG_PRINT("Malloc call recognized. Size: " << sz);
             }
         }
@@ -247,8 +250,11 @@ public:
             DEBUG_PRINT("Instruction is a BitCastInst. Original pointer: " << *originalPtr);
             auto it = state.find(originalPtr);
             if (it != state.end() && it->second.isConstant()) {
-                uint64_t allocSize = it->second.rvalue->getZExtValue() + 1; // Assuming range [0, size-1]
-                state[&I] = makeRange(castInst->getContext(), APInt(64, 0), APInt(64, allocSize - 1));
+                // unify bit widths to 64
+                uint64_t allocSize = it->second.rvalue->getValue().sextOrTrunc(64).getZExtValue() + 1;
+                state[&I] = makeRange(castInst->getContext(),
+                                      APInt(64, 0),
+                                      APInt(64, allocSize - 1));
                 DEBUG_PRINT("Associated derived pointer with size: " << allocSize);
             }
         }
@@ -314,13 +320,14 @@ public:
         auto range1 = getRangeFor(op1, state);
         auto range2 = getRangeFor(op2, state);
 
+        // For all arithmetic ops, unify bitwidths to 64 before performing them
         if (range1.isConstant() && range2.isConstant()) {
-            auto l1 = range1.lvalue->getValue();
-            auto r1 = range1.rvalue->getValue();
-            auto l2 = range2.lvalue->getValue();
-            auto r2 = range2.rvalue->getValue();
+            APInt l1 = range1.lvalue->getValue().sextOrTrunc(64);
+            APInt r1 = range1.rvalue->getValue().sextOrTrunc(64);
+            APInt l2 = range2.lvalue->getValue().sextOrTrunc(64);
+            APInt r2 = range2.rvalue->getValue().sextOrTrunc(64);
 
-            auto &ctx = (range1.lvalue)->getContext();
+            auto &ctx = range1.lvalue->getContext();
             auto opcode = binOp.getOpcode();
 
             if (opcode == Instruction::Add) {
@@ -375,6 +382,7 @@ public:
             }
             else if (opcode == Instruction::SDiv) {
                 DEBUG_PRINT("Handling SDiv operation.");
+                // Very simplified code below, but we unify widths first anyway
                 if (l2.isNegative() && r2.isStrictlyPositive()) {
                     auto abs1 = l1.abs();
                     auto abs2 = r1.abs();
@@ -494,7 +502,7 @@ private:
                 DEBUG_PRINT("Propagated malloc size " << sz << " to stored pointer " << *ptr);
             }
             else if (state.find(val) != state.end() && state[val].isConstant()) {
-                uint64_t allocSize = state[val].rvalue->getZExtValue() + 1; // [0, size-1]
+                uint64_t allocSize = state[val].rvalue->getValue().sextOrTrunc(64).getZExtValue() + 1;
                 state[ptr] = makeRange(ptr->getContext(), APInt(64, 0), APInt(64, allocSize - 1));
                 DEBUG_PRINT("Propagated malloc size " << allocSize << " to stored pointer " << *ptr);
             }
@@ -508,12 +516,8 @@ private:
             auto it = state.find(ptr);
             if (it != state.end()) {
                 state[&LI] = it->second;
-                DEBUG_PRINT("Loaded value from pointer " << *ptr << " with range kind: " << static_cast<int>(it->second.kind));
-
-                // Removed the incorrect allocation size propagation
-                // Previously, this set the range based on allocation size
-                // which is not always applicable for loaded values.
-
+                DEBUG_PRINT("Loaded value from pointer " << *ptr << " with range kind: " 
+                            << static_cast<int>(it->second.kind));
                 return;
             }
         }
@@ -537,7 +541,7 @@ private:
 
         // Handle multi-dimensional GEPs by iterating over all indices
         unsigned numIndices = gep.getNumIndices();
-        APInt totalOffset(64, 0); // Assuming 64-bit for simplicity
+        APInt totalOffset(64, 0); // always 64-bit offset
 
         for (unsigned i = 0; i < numIndices; ++i) {
             llvm::Value *indexVal = gep.getOperand(i + 1); // Operand 0 is the base pointer
@@ -551,7 +555,9 @@ private:
 
             // Handle constant indices
             if (indexRange.isConstant()) {
-                int64_t index = indexRange.lvalue->getSExtValue();
+                // unify bit widths
+                APInt idx = indexRange.lvalue->getValue().sextOrTrunc(64);
+                int64_t index = idx.getSExtValue();
                 const DataLayout &DL = gep.getModule()->getDataLayout();
                 Type *elemType = gep.getResultElementType();
                 uint64_t elemSize = DL.getTypeAllocSize(elemType);
@@ -563,10 +569,11 @@ private:
                 }
 
                 // Calculate the total offset in bytes
-                APInt indexOffset = APInt(64, index) * APInt(64, elemSize);
+                APInt indexOffset = APInt(64, (uint64_t)index) * APInt(64, elemSize);
                 totalOffset += indexOffset;
 
-                DEBUG_PRINT("GEP index " << index << " contributes " << elemSize << " bytes. Total offset now: " << totalOffset);
+                DEBUG_PRINT("GEP index " << index << " contributes " << elemSize 
+                            << " bytes. Total offset now: " << totalOffset);
             }
             else {
                 DEBUG_PRINT("GEP index is not constant. Setting GEP range to infinity.");
@@ -577,13 +584,15 @@ private:
 
         // Check if the total offset is within the base pointer's allocated size
         if (baseRange.isConstant()) {
-            uint64_t allocSize = baseRange.rvalue->getZExtValue() + 1; // [0, size-1]
+            // unify bitwidth
+            uint64_t allocSize = baseRange.rvalue->getValue().sextOrTrunc(64).getZExtValue() + 1;
             uint64_t computedOffset = totalOffset.getZExtValue();
 
-            DEBUG_PRINT("Computed total offset: " << computedOffset << " bytes. Allocated size: " << allocSize << " bytes.");
+            DEBUG_PRINT("Computed total offset: " << computedOffset 
+                        << " bytes. Allocated size: " << allocSize << " bytes.");
 
             if (computedOffset < allocSize) {
-                // Corrected Range: [0, allocSize - computedOffset - 1]
+                // corrected Range: [0, allocSize - computedOffset - 1]
                 if (allocSize <= computedOffset) {
                     DEBUG_PRINT("Computed offset exceeds or equals allocated size. Setting range to infinity.");
                     state[&gep].kind = PossibleRangeValues::infinity;
@@ -654,7 +663,7 @@ void valueRangeAnalysis(Module *M,
                     uint64_t mallocSize = 0;
                     // Check if basePtr has a constant range in state
                     if (auto it = state.find(basePtr); it != state.end() && it->second.isConstant()) {
-                        mallocSize = it->second.rvalue->getZExtValue() + 1; // [0, size-1]
+                        mallocSize = it->second.rvalue->getValue().sextOrTrunc(64).getZExtValue() + 1; 
                         hasMallocSize = true;
                         DEBUG_PRINT("Base pointer has a known allocation size: " << mallocSize);
                     }
@@ -668,14 +677,13 @@ void valueRangeAnalysis(Module *M,
                         if(vmkt){
                             if (TheState.GetPointerVariableInfo(vmkt) != NULL){
                                 UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
-                                // Additional safety check for vmktinfo
                                 if(!vmktinfo) {
                                     DEBUG_PRINT("vmktinfo is NULL; skipping analysis.");
                                     continue;
                                 }
 
                                 if (auto *gepInst = dyn_cast<llvm::GetElementPtrInst>(inst)) {
-                                    auto index = (gepInst->getNumOperands() > 2) 
+                                    auto index = (gepInst->getNumOperands() > 2)
                                                 ? gepInst->getOperand(2)
                                                 : gepInst->getOperand(1);
                                     DEBUG_PRINT("GEP index operand: " << *index);
@@ -686,13 +694,10 @@ void valueRangeAnalysis(Module *M,
                                         const DataLayout &DL = M->getDataLayout();
                                         Type *elemTy = gepInst->getResultElementType();
                                         uint64_t elemSize = DL.getTypeAllocSize(elemTy);
-
-                                        // Prevent division by zero
                                         if (elemSize == 0) {
                                             elemSize = 1;
                                             DEBUG_PRINT("Element size is 0. Setting to 1.");
                                         }
-
                                         int64_t maxElemCount = static_cast<int64_t>(mallocSize / elemSize);
                                         DEBUG_PRINT("Element size: " << elemSize << ", Max element count: " << maxElemCount);
                                         if (constant) {
@@ -711,8 +716,8 @@ void valueRangeAnalysis(Module *M,
                                                 heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                             }
                                             else if (rv2.isConstant()) {
-                                                int64_t lo = rv2.lvalue->getSExtValue();
-                                                int64_t hi = rv2.rvalue->getSExtValue();
+                                                int64_t lo = rv2.lvalue->getValue().sextOrTrunc(64).getSExtValue();
+                                                int64_t hi = rv2.rvalue->getValue().sextOrTrunc(64).getSExtValue();
                                                 DEBUG_PRINT("Index range: [" << lo << ", " << hi << "]");
                                                 if (lo < 0 || hi >= maxElemCount) {
                                                     DEBUG_PRINT("Index range exceeds bounds. Marking as unsafe.");
@@ -728,7 +733,6 @@ void valueRangeAnalysis(Module *M,
                                     }
 
                                     if (constant) {
-                                        // === Added check for vmktinfo->size ===
                                         auto *sizeCI = dyn_cast<ConstantInt>(vmktinfo->size);
                                         if(!sizeCI) {
                                             DEBUG_PRINT("vmktinfo->size is not a ConstantInt. Skipping analysis.");
@@ -736,7 +740,7 @@ void valueRangeAnalysis(Module *M,
                                         }
                                         int underlyingSize = sizeCI->getSExtValue();
 
-                                        DEBUG_PRINT("Index is a constant: " << constant->getSExtValue() 
+                                        DEBUG_PRINT("Index is a constant: " << constant->getSExtValue()
                                                    << ", Underlying size: " << underlyingSize);
                                         if (!constant->isNegative() && underlyingSize > 0) {
                                             DEBUG_PRINT("Index is within valid range. Continuing.");
@@ -749,7 +753,6 @@ void valueRangeAnalysis(Module *M,
                                         DEBUG_PRINT("Index is not a constant. Marking as unsafe.");
                                         heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                     }
-
                                 }
                             }
                         }
@@ -803,7 +806,8 @@ void valueRangeAnalysis(Module *M,
                             auto it = state.find(index);
                             if (it != state.end()) {
                                 auto &rangeValue = it->second;
-                                DEBUG_PRINT("Array index is not a constant. Range kind: " << static_cast<int>(rangeValue.kind));
+                                DEBUG_PRINT("Array index is not a constant. Range kind: " 
+                                            << static_cast<int>(rangeValue.kind));
                                 if (rangeValue.isUnknown() ||
                                     rangeValue.isInfinity() ||
                                     (rangeValue.lvalue && rangeValue.lvalue->isNegative())) {
@@ -821,7 +825,8 @@ void valueRangeAnalysis(Module *M,
                                 if(rangeValue.rvalue && rangeValue.rvalue->uge(size)){
                                     DEBUG_PRINT("Array index range exceeds allocated size through retriving the constant value of the variable index. Marking as unsafe.");
                                     DEBUG_PRINT("Max variable index: " << *rangeValue.rvalue);
-                                    DEBUG_PRINT("Max access range of the variable index: " << (int64_t)rangeValue.rvalue->getValue().getLimitedValue()*elmtBytes);
+                                    DEBUG_PRINT("Max access range of the variable index: " 
+                                                << (int64_t)rangeValue.rvalue->getValue().getLimitedValue()*elmtBytes);
                                     auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
                                     if (vmkt) {
                                         if (TheState.GetPointerVariableInfo(vmkt) != NULL){
@@ -879,10 +884,10 @@ void valueRangeAnalysis(Module *M,
                                         }
                                     }
                                     else if (rv2.isConstant()) {
-                                        int64_t lo = rv2.lvalue->getSExtValue();
-                                        int64_t hi = rv2.rvalue->getSExtValue();
+                                        int64_t lo = rv2.lvalue->getValue().sextOrTrunc(64).getSExtValue();
+                                        int64_t hi = rv2.rvalue->getValue().sextOrTrunc(64).getSExtValue();
                                         DEBUG_PRINT("Derived array index range: [" << lo << ", " << hi << "]");
-                                        if (lo < 0 || hi >= static_cast<int64_t>(size)) { // Use 'size' instead of 'maxElemCount'
+                                        if (lo < 0 || hi >= static_cast<int64_t>(size)) {
                                             DEBUG_PRINT("Derived array index range exceeds bounds. Marking as unsafe.");
                                             auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
                                             if (vmkt) {
@@ -930,7 +935,7 @@ void valueRangeAnalysis(Module *M,
                         else{
                             index = inst->getOperand(1);
                         }
-                        DEBUG_PRINT("Struct GEP index operand: " << index);
+                        DEBUG_PRINT("Struct GEP index operand: " << *index);
 
                         const llvm::StructLayout* structureLayout = layout.getStructLayout(structTy);
                         auto constant = dyn_cast<ConstantInt>(index);
@@ -973,7 +978,8 @@ void valueRangeAnalysis(Module *M,
                             auto it = state.find(index);
                             if (it != state.end()) {
                                 auto &rangeValue = it->second;
-                                DEBUG_PRINT("Struct index is not a constant. Range kind: " << static_cast<int>(rangeValue.kind));
+                                DEBUG_PRINT("Struct index is not a constant. Range kind: " 
+                                            << static_cast<int>(rangeValue.kind));
                                 if (rangeValue.isUnknown() ||
                                     rangeValue.isInfinity() ||
                                     (rangeValue.lvalue && rangeValue.lvalue->isNegative()) ||
@@ -1008,7 +1014,8 @@ void valueRangeAnalysis(Module *M,
                                 int64_t c = constant->getSExtValue();
                                 DEBUG_PRINT("Derived struct index constant value: " << c);
                                 if (c < 0 || c >= static_cast<int64_t>(size)) {
-                                    DEBUG_PRINT("Derived struct index " << c << " is out of bounds. Marking as unsafe.");
+                                    DEBUG_PRINT("Derived struct index " << c 
+                                                << " is out of bounds. Marking as unsafe.");
                                     auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
                                     if (vmkt) {
                                         if (TheState.GetPointerVariableInfo(vmkt) != NULL){
@@ -1023,7 +1030,8 @@ void valueRangeAnalysis(Module *M,
                                 auto it = state.find(index);
                                 if (it != state.end()) {
                                     auto &rv2 = it->second;
-                                    DEBUG_PRINT("Derived struct index range kind: " << static_cast<int>(rv2.kind));
+                                    DEBUG_PRINT("Derived struct index range kind: " 
+                                                << static_cast<int>(rv2.kind));
                                     if (rv2.isUnknown() || rv2.isInfinity()) {
                                         DEBUG_PRINT("Derived struct index range is unknown or infinity. Marking as unsafe.");
                                         auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
@@ -1036,8 +1044,8 @@ void valueRangeAnalysis(Module *M,
                                         }
                                     }
                                     else if (rv2.isConstant()) {
-                                        int64_t lo = rv2.lvalue->getSExtValue();
-                                        int64_t hi = rv2.rvalue->getSExtValue();
+                                        int64_t lo = rv2.lvalue->getValue().sextOrTrunc(64).getSExtValue();
+                                        int64_t hi = rv2.rvalue->getValue().sextOrTrunc(64).getSExtValue();
                                         DEBUG_PRINT("Derived struct index range: [" << lo << ", " << hi << "]");
                                         if (lo < 0 || hi >= static_cast<int64_t>(size)) {
                                             DEBUG_PRINT("Derived struct index range exceeds bounds. Marking as unsafe.");
@@ -1083,7 +1091,7 @@ void valueRangeAnalysis(Module *M,
 
         // Further processing can be done as needed
     }
-    errs() << GREEN <<"Unsafe Seq Pointer After Value Range Analysis:\t\t" 
+    errs() << GREEN <<"Unsafe Seq Pointer After Value Range Analysis:\t\t"
                << DETAIL << heapUnsafeSeqPointerSet.size() << NORMAL << "\n";
     for (const auto &entry : heapUnsafeSeqPointerSet) {
         const UnifiedMemSafe::VariableMapKeyType *vmkt = entry.first;
@@ -1091,10 +1099,9 @@ void valueRangeAnalysis(Module *M,
 
         // Print the instruction
         if (const llvm::Instruction *inst = llvm::dyn_cast<llvm::Instruction>(vmkt)) {
-            DEBUG_PRINT(*inst); 
+            DEBUG_PRINT(*inst);
         } else {
             DEBUG_PRINT("Non-instruction entry in heapUnsafeSeqPointerSet.\n");
         }
     }
 }
-
