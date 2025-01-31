@@ -82,15 +82,15 @@ struct RangeValue {
      *   4. Otherwise both are constant => unify
      */
     RangeValue operator|(const RangeValue &other) const {
-        // If already exactly the same (including both ∞, both unknown, or same constants)
+        // if already exactly the same (including both ∞, both unknown, or same constants)
+        // Uncomment if needed:
+        // llvm::errs() << "[RangeValue::operator|] Checking if identical.\n";
         if (*this == other) {
-            // Debug message (optional)
-            //llvm::errs() << "[RangeValue::operator|] Short-circuit: identical ranges\n";
+            // llvm::errs() << "[RangeValue::operator|] Short-circuit: identical ranges.\n";
             return *this;
         }
 
-        // Print that we are merging only once we know they differ
-        //llvm::errs() << "[RangeValue::operator|] Merging range kinds: "<< (int)kind << " | " << (int)other.kind << "\n";
+        // // llvm::errs() << "[RangeValue::operator|] Merging range kinds: " << (int)kind << " | " << (int)other.kind << "\n";
 
         // 1. If either side is infinity => result is infinity
         if (isInfinity() || other.isInfinity()) {
@@ -116,10 +116,11 @@ struct RangeValue {
         RangeValue r;
         r.kind = PossibleRangeValues::constant;
 
-        auto &selfL   = lvalue->getValue();
-        auto &selfR   = rvalue->getValue();
-        auto &otherL  = other.lvalue->getValue();
-        auto &otherR  = other.rvalue->getValue();
+        // unify bit widths to 64 bits before comparisons
+        APInt selfL = lvalue->getValue().sextOrTrunc(64);
+        APInt selfR = rvalue->getValue().sextOrTrunc(64);
+        APInt otherL = other.lvalue->getValue().sextOrTrunc(64);
+        APInt otherR = other.rvalue->getValue().sextOrTrunc(64);
 
         // Take the smallest "left" bound
         if (selfL.slt(otherL)) {
@@ -144,15 +145,18 @@ struct RangeValue {
      * - unknown == unknown
      */
     bool operator==(const RangeValue &other) const {
+        // Uncomment if needed:
+        // llvm::errs() << "[RangeValue::operator==] Checking equality.\n";
+
         if (kind != other.kind) {
             return false;
         }
         if (kind == PossibleRangeValues::constant) {
-            // Compare underlying constants
-            auto &selfL   = lvalue->getValue();
-            auto &selfR   = rvalue->getValue();
-            auto &otherL  = other.lvalue->getValue();
-            auto &otherR  = other.rvalue->getValue();
+            // Compare underlying constants with unified bit widths
+            APInt selfL = lvalue->getValue().sextOrTrunc(64);
+            APInt selfR = rvalue->getValue().sextOrTrunc(64);
+            APInt otherL = other.lvalue->getValue().sextOrTrunc(64);
+            APInt otherR = other.rvalue->getValue().sextOrTrunc(64);
             return (selfL == otherL && selfR == otherR);
         }
         // If both unknown or both infinity => they match
@@ -166,7 +170,7 @@ struct RangeValue {
    --------------------------------------------------------- */
 
 RangeValue makeRange(LLVMContext &context, APInt &left, APInt &right) {
-    //llvm::errs() << "[makeRange] Creating constant range [" << left << ", " << right << "]\n";
+    // llvm::errs() << "[makeRange] Creating constant range [" << left << ", " << right << "]\n";
     RangeValue r;
     r.kind = PossibleRangeValues::constant;
     r.lvalue = ConstantInt::get(context, left);
@@ -175,7 +179,7 @@ RangeValue makeRange(LLVMContext &context, APInt &left, APInt &right) {
 }
 
 RangeValue infRange() {
-    //llvm::errs() << "[infRange] Creating infinite range.\n";
+    // llvm::errs() << "[infRange] Creating infinite range.\n";
     RangeValue r;
     r.kind = PossibleRangeValues::infinity;
     return r;
@@ -192,7 +196,7 @@ class RangeMeet : public analysis::Meet<RangeValue, RangeMeet> {
 public:
     RangeValue
     meetPair(RangeValue &s1, RangeValue &s2) const {
-        //llvm::errs() << "[RangeMeet::meetPair] Called.\n";
+        // llvm::errs() << "[RangeMeet::meetPair] Called.\n";
         return s1 | s2;
     }
 };
@@ -212,7 +216,7 @@ public:
 
     RangeValue evaluateBinOP(llvm::BinaryOperator &binOp,
                              RangeState &state) const {
-        //llvm::errs() << "[RangeTransfer::evaluateBinOP] " << binOp << "\n";
+        // llvm::errs() << "[RangeTransfer::evaluateBinOP] " << binOp << "\n";
         auto *op1 = binOp.getOperand(0);
         auto *op2 = binOp.getOperand(1);
 
@@ -221,45 +225,48 @@ public:
 
         // If either side is infinity => result is infinity
         if (range1.isInfinity() || range2.isInfinity()) {
+            // llvm::errs() << "  => Infinity.\n";
             return infRange();
         }
 
         // If both unknown => result is unknown (by default)
         if (range1.isUnknown() && range2.isUnknown()) {
+            // llvm::errs() << "  => Both unknown => unknown.\n";
             return RangeValue();
         }
 
-        // If either side unknown, or if not both constant => we cannot refine => unknown
+        // If either side unknown, or if not both constant => unknown
         if (!(range1.isConstant() && range2.isConstant())) {
-            return RangeValue(); // unknown
+            // llvm::errs() << "  => One side unknown or not constant => unknown.\n";
+            return RangeValue();
         }
 
-        // Both are constant => compute range carefully
-        auto l1 = range1.lvalue->getValue();
-        auto r1 = range1.rvalue->getValue();
-        auto l2 = range2.lvalue->getValue();
-        auto r2 = range2.rvalue->getValue();
+        // Both are constant => unify bit widths
+        APInt l1 = range1.lvalue->getValue().sextOrTrunc(64);
+        APInt r1 = range1.rvalue->getValue().sextOrTrunc(64);
+        APInt l2 = range2.lvalue->getValue().sextOrTrunc(64);
+        APInt r2 = range2.rvalue->getValue().sextOrTrunc(64);
 
         auto &context = range1.lvalue->getContext();
         auto opcode = binOp.getOpcode();
 
-        // We handle the common binops; otherwise, fall back to infinity or unknown
         switch (opcode) {
         case Instruction::Add: {
             bool ofL, ofR;
             auto ll = l1.sadd_ov(l2, ofL);
             auto rr = r1.sadd_ov(r2, ofR);
             if (ofL || ofR) {
+                // llvm::errs() << "  => Overflow in Add => infRange.\n";
                 return infRange();
             }
             return makeRange(context, ll, rr);
         }
         case Instruction::Sub: {
             bool ofL, ofR;
-            // Sub range => watch carefully for the cross terms
             auto ll = l1.ssub_ov(r2, ofL);
             auto rr = r1.ssub_ov(l2, ofR);
             if (ofL || ofR) {
+                // llvm::errs() << "  => Overflow in Sub => infRange.\n";
                 return infRange();
             }
             return makeRange(context, ll, rr);
@@ -273,6 +280,7 @@ public:
             candidates.push_back(r1.smul_ov(r2, of[3]));
             for (auto o : of) {
                 if (o) {
+                    // llvm::errs() << "  => Overflow in Mul => infRange.\n";
                     return infRange();
                 }
             }
@@ -285,9 +293,6 @@ public:
             return makeRange(context, mn, mx);
         }
         case Instruction::SDiv: {
-            // Sign issues => we do a conservative approach
-            // If any denominator range includes zero, or sign changes => could blow up
-            // We'll do a simplified approach:
             SmallVector<APInt, 4> candidates;
             bool of[4];
             candidates.push_back(l1.sdiv_ov(l2, of[0]));
@@ -296,6 +301,7 @@ public:
             candidates.push_back(r1.sdiv_ov(r2, of[3]));
             for (auto o : of) {
                 if (o) {
+                    // llvm::errs() << "  => Overflow in SDiv => infRange.\n";
                     return infRange();
                 }
             }
@@ -308,38 +314,30 @@ public:
             return makeRange(context, mn, mx);
         }
         case Instruction::UDiv: {
-            // Quick attempt for a range
-            // We assume top bits might be zero => do something simplistic
-            // e.g. [r1.udiv(r2), l1.udiv(l2)] is tricky if sign changes
-            // We'll do minimal approach
             auto ll = r1.udiv(l2);
             auto rr = l1.udiv(r2);
-            // Actually we might need to reorder if ll>rr
             APInt minVal = (ll.ult(rr) ? ll : rr);
             APInt maxVal = (ll.ugt(rr) ? ll : rr);
             return makeRange(context, minVal, maxVal);
         }
         default:
-            // Additional ops => we treat as infinite or unknown
+            // llvm::errs() << "  => Unhandled op => infRange.\n";
             return infRange();
         }
     }
 
     RangeValue evaluateCast(llvm::CastInst &castOp, RangeState &state) const {
-        //llvm::errs() << "[RangeTransfer::evaluateCast] " << castOp << "\n";
+        // llvm::errs() << "[RangeTransfer::evaluateCast] " << castOp << "\n";
         auto *op = castOp.getOperand(0);
         auto value = getRangeFor(op, state);
 
-        // If already infinity => remain infinity
         if (value.isInfinity()) {
             return value;
         }
-        // If unknown => remain unknown
         if (value.isUnknown()) {
             return value;
         }
 
-        // Both sides constant => try to fold
         auto &layout = castOp.getModule()->getDataLayout();
         auto x = ConstantFoldCastOperand(castOp.getOpcode(),
                                          value.lvalue,
@@ -351,20 +349,19 @@ public:
                                          layout);
 
         if (!x || !y) {
+            // llvm::errs() << "  => Non-foldable => infRange.\n";
             return infRange();
         }
-        // If either is a ConstantExpr, we bail out
         if (isa<ConstantExpr>(x) || isa<ConstantExpr>(y)) {
+            // llvm::errs() << "  => ConstantExpr => infRange.\n";
             return infRange();
         }
 
-        // Otherwise, if both are ConstantInt, create new range
         auto *cx = dyn_cast<ConstantInt>(x);
         auto *cy = dyn_cast<ConstantInt>(y);
         if (cx && cy) {
             RangeValue r;
             r.kind = PossibleRangeValues::constant;
-            // We'll assume x <= y for an upcast but we should reorder if needed
             if (cx->getValue().slt(cy->getValue())) {
                 r.lvalue = cx;
                 r.rvalue = cy;
@@ -379,7 +376,7 @@ public:
 
     void
     operator()(llvm::Value &i, RangeState &state) {
-        //llvm::errs() << "[RangeTransfer::operator()] Transfer on: " << i << "\n";
+        // llvm::errs() << "[RangeTransfer::operator()] Transfer on: " << i << "\n";
         if (auto *constant = dyn_cast<ConstantInt>(&i)) {
             RangeValue r;
             r.kind = PossibleRangeValues::constant;
@@ -393,8 +390,7 @@ public:
             state[&i] = evaluateCast(*castOp, state);
         }
         else {
-            // For instructions not recognized => Infinity
-            //llvm::errs() << "  => Setting to Infinity.\n";
+            // llvm::errs() << "  => Setting to Infinity.\n";
             state[&i] = infRange();
         }
     }
@@ -408,8 +404,6 @@ void valueRangeAnalysis(Module *M,
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> heapSeqPointerSet,
     UnifiedMemSafe::AnalysisState TheState)
 {
-    //llvm::errs() << "[valueRangeAnalysis] Starting...\n";
-
     auto *mainFunction = M->getFunction("main");
     if (!mainFunction) {
        errs() << RED << "Unable to find main function for Value-Range Analysis! Skipping!\n" << NORMAL;
@@ -421,25 +415,20 @@ void valueRangeAnalysis(Module *M,
     using Meet     = RangeMeet;
     using Analysis = analysis::ForwardDataflowAnalysis<Value, Transfer, Meet>;
 
-    //llvm::errs() << "[valueRangeAnalysis] Initializing forward dataflow from 'main'.\n";
+    // llvm::errs() << "[valueRangeAnalysis] Initializing forward dataflow from 'main'.\n";
     Analysis analysis{*M, mainFunction};
     auto results = analysis.computeForwardDataflow();
-    //llvm::errs() << "[valueRangeAnalysis] Dataflow complete.\n";
+    // llvm::errs() << "[valueRangeAnalysis] Dataflow complete.\n";
 
-    // For demonstration, gather "unsafe" pointer checks
     std::map<const UnifiedMemSafe::VariableMapKeyType *, UnifiedMemSafe::VariableInfo> heapUnsafeSeqPointerSet;
 
-    // Example post-processing to check GEP offsets
     for (auto & [ctxt, contextResults] : results) {
-        //llvm::errs() << "[valueRangeAnalysis] Checking context...\n";
         for (auto & [function, rangeStates] : contextResults) {
-            //llvm::errs() << "  [Context] Function: " << function->getName()<< ", #values: " << rangeStates.size() << "\n";
             for (auto &valueStatePair : rangeStates) {
                 auto *inst = dyn_cast<GetElementPtrInst>(valueStatePair.first);
                 if (!inst) {
                     continue;
                 }
-                //llvm::errs() << "    [GEP] Found GEP inst: " << *inst << "\n";
 
                 if (heapSeqPointerSet.find(inst) != heapSeqPointerSet.end()) {
                     auto &state = analysis::getIncomingState(rangeStates, *inst);
@@ -474,11 +463,9 @@ void valueRangeAnalysis(Module *M,
                                         if (!constant->isNegative() && underlyingSize > 0) {
                                             continue; // probably safe
                                         } else {
-                                            //llvm::errs() << "    [Unsafe] GEP offset out-of-bounds.\n";
                                             heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                         }
                                     } else {
-                                        //llvm::errs() << "    [Unsafe] GEP offset non-constant => potential OOB.\n";
                                         heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                                     }
                                 }
@@ -506,7 +493,6 @@ void valueRangeAnalysis(Module *M,
                                     // within bounds
                                 }
                                 else {
-                                    //llvm::errs() << "    [Unsafe] GEP offset beyond array size (bytes).\n";
                                     if (auto *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)) {
                                         if (auto *vmktinfo = TheState.GetPointerVariableInfo(vmkt)) {
                                             heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
@@ -522,7 +508,6 @@ void valueRangeAnalysis(Module *M,
                                 !rangeValue.lvalue || !rangeValue.rvalue ||
                                 rangeValue.lvalue->isNegative() ||
                                 rangeValue.rvalue->uge(size)) {
-                                //llvm::errs() << "    [Unsafe] Non-constant or wide offset in array GEP.\n";
                                 if (auto *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)) {
                                     if (auto *vmktinfo = TheState.GetPointerVariableInfo(vmkt)) {
                                         heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
@@ -553,7 +538,6 @@ void valueRangeAnalysis(Module *M,
                                         // within bounds
                                     }
                                     else {
-                                        //llvm::errs() << "    [Unsafe] GEP offset beyond struct size.\n";
                                         if (auto *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)) {
                                             if (auto *vmktinfo = TheState.GetPointerVariableInfo(vmkt)) {
                                                 heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
@@ -562,7 +546,6 @@ void valueRangeAnalysis(Module *M,
                                     }
                                 }
                             } else {
-                                //llvm::errs() << "    [Unsafe] GEP index out of range for struct.\n";
                                 if (auto *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)) {
                                     if (auto *vmktinfo = TheState.GetPointerVariableInfo(vmkt)) {
                                         heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
@@ -577,7 +560,6 @@ void valueRangeAnalysis(Module *M,
                                 !rangeValue.lvalue || !rangeValue.rvalue ||
                                 rangeValue.lvalue->isNegative() ||
                                 rangeValue.rvalue->uge(size)) {
-                                //llvm::errs() << "    [Unsafe] Non-constant or wide offset in struct GEP.\n";
                                 if (auto *vmkt = dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(inst)) {
                                     if (auto *vmktinfo = TheState.GetPointerVariableInfo(vmkt)) {
                                         heapUnsafeSeqPointerSet[vmkt]=*vmktinfo;
@@ -596,6 +578,4 @@ void valueRangeAnalysis(Module *M,
 
     errs() << GREEN << "Unsafe Seq Pointer After Value Range Analysis:\t\t"
            << DETAIL << heapUnsafeSeqPointerSet.size() << NORMAL << "\n";
-
-    //llvm::errs() << "[valueRangeAnalysis] Finished.\n";
 }
