@@ -693,7 +693,7 @@ void valueRangeAnalysis(Module *M,
                                 heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
                             }
                         }
-                        DEBUG_PRINT("Base pointer is not a known malloc or derived malloc pointer.");
+                        DEBUG_PRINT("Base pointer is not a known constant-size'ed malloc or derived malloc pointer.");
                     }
 
                     if(!arrayTy && !structTy){
