@@ -69,8 +69,9 @@ static bool isLocalAllocaPointer(Value *ptr) {
 }
 
 // ----------------------------------------------------------------------
-// NEW: Check if pointer is a call to malloc(...) with a compile-time
-//      constant size. If recognized, store into 'nbytes' and return true.
+// UPDATED: Check if pointer is a call to malloc(...). For calls with
+//          a non-constant size, we still recognize it as a malloc call
+//          but return `nbytes = 0` to indicate unknown size.
 // ----------------------------------------------------------------------
 static bool isKnownMallocCall(llvm::Value *v, uint64_t &nbytes) {
     if (!v) return false;
@@ -81,14 +82,19 @@ static bool isKnownMallocCall(llvm::Value *v, uint64_t &nbytes) {
     Function *callee = call->getCalledFunction();
     if (!callee) return false;
     if (callee->getName() != "malloc") return false;
+    // Update the logic here to handle customized allocation wrappers
 
     if (call->arg_size() < 1) return false;
     if (auto *cint = dyn_cast<ConstantInt>(call->getArgOperand(0))) {
+        // Update here as well to reflect the size
         nbytes = cint->getZExtValue();
         DEBUG_PRINT("Detected malloc call with size: " << nbytes);
-        return true;
+    } else {
+        // Non-constant allocation size => still recognized as malloc
+        nbytes = 0; // Use 0 as a sentinel for "unknown" or variable size
+        DEBUG_PRINT("Detected malloc call with non-constant size; setting nbytes=0 to indicate unknown size.");
     }
-    return false;
+    return true;
 }
 
 enum class PossibleRangeValues {
@@ -498,8 +504,14 @@ private:
             // Propagate allocation size if val is a malloc or derived pointer
             uint64_t sz = 0;
             if (isKnownMallocCall(val, sz)) {
-                state[ptr] = makeRange(ptr->getContext(), APInt(64, 0), APInt(64, sz - 1));
-                DEBUG_PRINT("Propagated malloc size " << sz << " to stored pointer " << *ptr);
+                // If sz == 0 => non-constant => treat as unknown => infinity
+                if (sz == 0) {
+                    state[ptr] = infRange();
+                    DEBUG_PRINT("Propagated unknown malloc size to stored pointer " << *ptr);
+                } else {
+                    state[ptr] = makeRange(ptr->getContext(), APInt(64, 0), APInt(64, sz - 1));
+                    DEBUG_PRINT("Propagated malloc size " << sz << " to stored pointer " << *ptr);
+                }
             }
             else if (state.find(val) != state.end() && state[val].isConstant()) {
                 uint64_t allocSize = state[val].rvalue->getValue().sextOrTrunc(64).getZExtValue() + 1;
@@ -646,7 +658,9 @@ void valueRangeAnalysis(Module *M,
                 if (!inst) {
                     continue;
                 }
-                if (heapSeqPointerSet.find(inst) != heapSeqPointerSet.end()){
+
+                // We only check GEP instructions that we previously recognized in "heapSeqPointerSet":
+                if (heapSeqPointerSet.find(inst) != heapSeqPointerSet.end()) {
                     DEBUG_PRINT("\nAnalyzing GEP instruction: " << *inst);
                     auto &state = analysis::getIncomingState(rangeStates, *inst);
                     Type *type = cast<PointerType>(
@@ -661,13 +675,24 @@ void valueRangeAnalysis(Module *M,
                     // See if basePtr is recognized malloc or derived malloc => do bounding
                     bool hasMallocSize = false;
                     uint64_t mallocSize = 0;
+
                     // Check if basePtr has a constant range in state
                     if (auto it = state.find(basePtr); it != state.end() && it->second.isConstant()) {
-                        mallocSize = it->second.rvalue->getValue().sextOrTrunc(64).getZExtValue() + 1; 
+                        mallocSize = it->second.rvalue->getValue().sextOrTrunc(64).getZExtValue() + 1;
                         hasMallocSize = true;
                         DEBUG_PRINT("Base pointer has a known allocation size: " << mallocSize);
-                    }
-                    else {
+                    } else {
+                        // If the pointer is in Infinity/Unknown range, we mark the GEP unsafe:
+                        auto it2 = state.find(basePtr);
+                        if (it2 != state.end() &&
+                            (it2->second.isInfinity() || it2->second.isUnknown())) {
+                            auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
+                            if (vmkt && TheState.GetPointerVariableInfo(vmkt) != NULL) {
+                                UnifiedMemSafe::VariableInfo *vmktinfo = TheState.GetPointerVariableInfo(vmkt);
+                                DEBUG_PRINT("Base pointer has infinite/unknown range => Marking GEP as unsafe.");
+                                heapUnsafeSeqPointerSet[vmkt] = *vmktinfo;
+                            }
+                        }
                         DEBUG_PRINT("Base pointer is not a known malloc or derived malloc pointer.");
                     }
 
@@ -689,7 +714,8 @@ void valueRangeAnalysis(Module *M,
                                     DEBUG_PRINT("GEP index operand: " << *index);
 
                                     auto constant = dyn_cast<ConstantInt>(index);
-                                    // if malloc => do bounding
+
+                                    // If this base pointer has a known malloc size, do bounding:
                                     if (hasMallocSize) {
                                         const DataLayout &DL = M->getDataLayout();
                                         Type *elemTy = gepInst->getResultElementType();
@@ -732,6 +758,7 @@ void valueRangeAnalysis(Module *M,
                                         continue;
                                     }
 
+                                    // Otherwise, if no known malloc size, fall back on vmkt->size if available:
                                     if (constant) {
                                         auto *sizeCI = dyn_cast<ConstantInt>(vmktinfo->size);
                                         if(!sizeCI) {
