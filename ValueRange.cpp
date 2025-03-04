@@ -806,6 +806,10 @@ void valueRangeAnalysis(Module *M,
                                     DEBUG_PRINT("Array size in terms of number of elements: "<< numBytes/elmtBytes);
                                     DEBUG_PRINT("Array total size: "<< numBytes);
                                     DEBUG_PRINT("Array index within bounds. Safe access.");
+                                    auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
+                                    if (vmkt) {
+                                        heapUnsafeSeqPointerSet.erase(vmkt);
+                                    }
                                 }
                                 else{
                                     DEBUG_PRINT("Array index multiplied by element size exceeds allocated bytes. Marking as unsafe.");
@@ -901,6 +905,10 @@ void valueRangeAnalysis(Module *M,
                                             : 0;
                                         DEBUG_PRINT("Array index constant range is [" << loVal <<", " 
                                                     << hiVal << "], within the array size: " << size <<". Safe access.");
+                                        auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
+                                        if (vmkt) {
+                                            heapUnsafeSeqPointerSet.erase(vmkt);
+                                        }
                                     }
                                 }
 
@@ -1037,6 +1045,10 @@ void valueRangeAnalysis(Module *M,
                                 if (!constant->isNegative() && intIndex < size) {
                                     if (numBytes >= offset + layout.getTypeAllocSize(structTy->getElementType(intIndex))){
                                         DEBUG_PRINT("Struct index within bounds based on offset. Safe access.");
+                                        auto vmkt = dyn_cast<UnifiedMemSafe::VariableMapKeyType>(inst);
+                                        if (vmkt) {
+                                            heapUnsafeSeqPointerSet.erase(vmkt);
+                                        }
                                     }
                                     else{
                                         DEBUG_PRINT("Struct index offset exceeds allocated bytes. Marking as unsafe.");
