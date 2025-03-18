@@ -75,60 +75,95 @@ struct RangeValue {
         return kind == PossibleRangeValues::constant;
     }
 
-    RangeValue
-    operator|(const RangeValue &other) const {
-        RangeValue r;
-        if (isUnknown() || other.isUnknown()) {
-            if (isUnknown()) {
-                return other;
-            }
-            else {
-                return *this;
-            }
+    /**
+     * Merge (meet) operator. Reorder checks to 
+     *   short-circuit the common scenarios:
+     *   1. Identical ranges => early return
+     *   2. Either side is infinity => infinity
+     *   3. Unknown merges with X => X (unless both are unknown)
+     *   4. Otherwise both are constant => unify
+     */
+    RangeValue operator|(const RangeValue &other) const {
+        // if already exactly the same (including both ∞, both unknown, or same constants)
+        // Uncomment if needed:
+        // llvm::errs() << "[RangeValue::operator|] Checking if identical.\n";
+        if (*this == other) {
+            // llvm::errs() << "[RangeValue::operator|] Short-circuit: identical ranges.\n";
+            return *this;
         }
-        else if (isInfinity() || other.isInfinity()) {
+
+        // // llvm::errs() << "[RangeValue::operator|] Merging range kinds: " << (int)kind << " | " << (int)other.kind << "\n";
+
+        // 1. If either side is infinity => result is infinity
+        if (isInfinity() || other.isInfinity()) {
+            RangeValue r;
             r.kind = PossibleRangeValues::infinity;
             return r;
         }
-        else {
-            auto &selfL = lvalue->getValue();
-            auto &selfR = rvalue->getValue();
-            auto &otherL = (other.lvalue)->getValue();
-            auto &otherR = (other.rvalue)->getValue();
 
-            r.kind = PossibleRangeValues::constant;
-            if (selfL.slt(otherL)) {
-                r.lvalue = lvalue;
-            }
-            else {
-                r.lvalue = other.lvalue;
-            }
-
-            if (selfR.sgt(otherR)) {
-                r.rvalue = rvalue;
-            }
-            else {
-                r.rvalue = other.rvalue;
-            }
-            return r;
+        // 2. If both unknown => still unknown
+        if (isUnknown() && other.isUnknown()) {
+            return RangeValue(); // Both unknown
         }
+
+        // 3. If one is unknown => take the other
+        if (isUnknown()) {
+            return other;
+        }
+        if (other.isUnknown()) {
+            return *this;
+        }
+
+        // 4. Otherwise, both are constant => unify the numeric range
+        RangeValue r;
+        r.kind = PossibleRangeValues::constant;
+
+        // unify bit widths to 64 bits before comparisons
+        APInt selfL = lvalue->getValue().sextOrTrunc(64);
+        APInt selfR = rvalue->getValue().sextOrTrunc(64);
+        APInt otherL = other.lvalue->getValue().sextOrTrunc(64);
+        APInt otherR = other.rvalue->getValue().sextOrTrunc(64);
+
+        // Take the smallest "left" bound
+        if (selfL.slt(otherL)) {
+            r.lvalue = lvalue;
+        } else {
+            r.lvalue = other.lvalue;
+        }
+        // Take the largest "right" bound
+        if (selfR.sgt(otherR)) {
+            r.rvalue = rvalue;
+        } else {
+            r.rvalue = other.rvalue;
+        }
+
+        return r;
     }
 
-    bool
-    operator==(const RangeValue &other) const {
-        if (kind == PossibleRangeValues::constant &&
-            other.kind == PossibleRangeValues::constant) {
-            auto &selfL = lvalue->getValue();
-            auto &selfR = rvalue->getValue();
-            auto &otherL = (other.lvalue)->getValue();
-            auto &otherR = (other.rvalue)->getValue();
-            return selfL == otherL && selfR == otherR;
-        }
-        else {
-            return kind == other.kind;
-        }
-    }
+    /**
+     * Equality check. 
+     * - constant == constant if they have the same [lvalue, rvalue].
+     * - infinity == infinity
+     * - unknown == unknown
+     */
+    bool operator==(const RangeValue &other) const {
+        // Uncomment if needed:
+        // llvm::errs() << "[RangeValue::operator==] Checking equality.\n";
 
+        if (kind != other.kind) {
+            return false;
+        }
+        if (kind == PossibleRangeValues::constant) {
+            // Compare underlying constants with unified bit widths
+            APInt selfL = lvalue->getValue().sextOrTrunc(64);
+            APInt selfR = rvalue->getValue().sextOrTrunc(64);
+            APInt otherL = other.lvalue->getValue().sextOrTrunc(64);
+            APInt otherR = other.rvalue->getValue().sextOrTrunc(64);
+            return (selfL == otherL && selfR == otherR);
+        }
+        // If both unknown or both infinity => they match
+        return true;
+    }
 };
 
 RangeValue makeRange(LLVMContext &context, APInt &left, APInt &right) {
@@ -173,125 +208,113 @@ public:
 
     RangeValue evaluateBinOP(llvm::BinaryOperator &binOp,
                              RangeState &state) const {
-
-        // errs() << "evaluateBinop" << "\n";
+        // llvm::errs() << "[RangeTransfer::evaluateBinOP] " << binOp << "\n";
         auto *op1 = binOp.getOperand(0);
         auto *op2 = binOp.getOperand(1);
+
         auto range1 = getRangeFor(op1, state);
         auto range2 = getRangeFor(op2, state);
 
-        if (range1.isConstant() && range2.isConstant()) {
-            auto l1 = range1.lvalue->getValue();
-            auto r1 = range1.rvalue->getValue();
-            auto l2 = range2.lvalue->getValue();
-            auto r2 = range2.rvalue->getValue();
+        // If either side is infinity => result is infinity
+        if (range1.isInfinity() || range2.isInfinity()) {
+            // llvm::errs() << "  => Infinity.\n";
+            return infRange();
+        }
 
-            auto &context = (range1.lvalue)->getContext();
-            auto opcode = binOp.getOpcode();
+        // If both unknown => result is unknown (by default)
+        if (range1.isUnknown() && range2.isUnknown()) {
+            // llvm::errs() << "  => Both unknown => unknown.\n";
+            return RangeValue();
+        }
 
-            if (opcode == Instruction::Add) {
-                bool ofl, ofr;
-                auto ll = l1.sadd_ov(l2, ofl);
-                auto rr = r1.sadd_ov(r2, ofr);
-                if (ofl || ofr) {
-                    return infRange();
-                }
-                else {
-                    return makeRange(context, ll, rr);
-                }
-            }
-            else if (opcode == Instruction::Sub) {
-                bool ofl, ofr;
-                auto ll = l1.ssub_ov(r2, ofl);
-                auto rr = r1.ssub_ov(l2, ofr);
-                if (ofl || ofr) {
-                    return infRange();
-                }
-                else {
-                    return makeRange(context, ll, rr);
-                }
-            }
-            else if (opcode == Instruction::Mul) {
-                SmallVector<APInt, 4> candidates;
-                bool ofFlags[4];
-                candidates.push_back(l1.smul_ov(l2, ofFlags[0]));
-                candidates.push_back(l1.smul_ov(r2, ofFlags[1]));
-                candidates.push_back(r1.smul_ov(l2, ofFlags[2]));
-                candidates.push_back(r1.smul_ov(r2, ofFlags[3]));
-                for (auto of:ofFlags) {
-                    if (of) {
-                        return infRange();
-                    }
-                }
-                auto mx = candidates[0];
-                for (auto &x : candidates) {
-                    if (x.sgt(mx)) {
-                        mx = x;
-                    }
-                }
-                auto mn = candidates[0];
-                for (auto &x : candidates) {
-                    if (x.slt(mn)) {
-                        mn = x;
-                    }
-                }
-                return makeRange(context, mn, mx);
-            }
-            else if (opcode == Instruction::SDiv) {
-                if (l2.isNegative() && r2.isStrictlyPositive()) {
-                    auto abs1 = l1.abs();
-                    auto abs2 = r1.abs();
-                    auto abs = abs1.sgt(abs2) ? abs1 : abs2;
-                    APInt ll(abs);
-                    ll.flipAllBits();
-                    ++ll;
-                    return makeRange(context, ll, abs);
-                }
-                else {
-                    SmallVector<APInt, 4> candidates;
-                    bool ofFlags[4];
-                    candidates.push_back(l1.sdiv_ov(l2, ofFlags[0]));
-                    candidates.push_back(l1.sdiv_ov(r2, ofFlags[1]));
-                    candidates.push_back(r1.sdiv_ov(l2, ofFlags[2]));
-                    candidates.push_back(r1.sdiv_ov(r2, ofFlags[3]));
-                    for (auto of:ofFlags) {
-                        if (of) {
-                            return infRange();
-                        }
-                    }
-                    auto mx = candidates[0];
-                    for (auto &xx : candidates) {
-                        if (xx.sgt(mx)) {
-                            mx = xx;
-                        }
-                    }
-                    auto mn = candidates[0];
-                    for (auto &xx : candidates) {
-                        if (xx.slt(mn)) {
-                            mn = xx;
-                        }
-                    }
-                    return makeRange(context, mn, mx);
-                }
-            }
-            else if (opcode == Instruction::UDiv) {
-                auto ll = r1.udiv(l2);
-                auto rr = l1.udiv(r2);
-                return makeRange(context, ll, rr);
-            }
-            else {
-                // todo: fill in
+        // If either side unknown, or if not both constant => unknown
+        if (!(range1.isConstant() && range2.isConstant())) {
+            // llvm::errs() << "  => One side unknown or not constant => unknown.\n";
+            return RangeValue();
+        }
+
+        // Both are constant => unify bit widths
+        APInt l1 = range1.lvalue->getValue().sextOrTrunc(64);
+        APInt r1 = range1.rvalue->getValue().sextOrTrunc(64);
+        APInt l2 = range2.lvalue->getValue().sextOrTrunc(64);
+        APInt r2 = range2.rvalue->getValue().sextOrTrunc(64);
+
+        auto &context = range1.lvalue->getContext();
+        auto opcode = binOp.getOpcode();
+
+        switch (opcode) {
+        case Instruction::Add: {
+            bool ofL, ofR;
+            auto ll = l1.sadd_ov(l2, ofL);
+            auto rr = r1.sadd_ov(r2, ofR);
+            if (ofL || ofR) {
+                // llvm::errs() << "  => Overflow in Add => infRange.\n";
                 return infRange();
             }
+            return makeRange(context, ll, rr);
         }
-        else if (range1.isInfinity() || range2.isInfinity()) {
-            RangeValue r;
-            r.kind = PossibleRangeValues::infinity;
-            return r;
+        case Instruction::Sub: {
+            bool ofL, ofR;
+            auto ll = l1.ssub_ov(r2, ofL);
+            auto rr = r1.ssub_ov(l2, ofR);
+            if (ofL || ofR) {
+                // llvm::errs() << "  => Overflow in Sub => infRange.\n";
+                return infRange();
+            }
+            return makeRange(context, ll, rr);
         }
-        else {
-            RangeValue r;
-            return r;
+        case Instruction::Mul: {
+            SmallVector<APInt, 4> candidates;
+            bool of[4];
+            candidates.push_back(l1.smul_ov(l2, of[0]));
+            candidates.push_back(l1.smul_ov(r2, of[1]));
+            candidates.push_back(r1.smul_ov(l2, of[2]));
+            candidates.push_back(r1.smul_ov(r2, of[3]));
+            for (auto o : of) {
+                if (o) {
+                    // llvm::errs() << "  => Overflow in Mul => infRange.\n";
+                    return infRange();
+                }
+            }
+            auto mn = candidates[0];
+            auto mx = candidates[0];
+            for (auto &val : candidates) {
+                if (val.slt(mn)) mn = val;
+                if (val.sgt(mx)) mx = val;
+            }
+            return makeRange(context, mn, mx);
+        }
+        case Instruction::SDiv: {
+            SmallVector<APInt, 4> candidates;
+            bool of[4];
+            candidates.push_back(l1.sdiv_ov(l2, of[0]));
+            candidates.push_back(l1.sdiv_ov(r2, of[1]));
+            candidates.push_back(r1.sdiv_ov(l2, of[2]));
+            candidates.push_back(r1.sdiv_ov(r2, of[3]));
+            for (auto o : of) {
+                if (o) {
+                    // llvm::errs() << "  => Overflow in SDiv => infRange.\n";
+                    return infRange();
+                }
+            }
+            auto mn = candidates[0];
+            auto mx = candidates[0];
+            for (auto &val : candidates) {
+                if (val.slt(mn)) mn = val;
+                if (val.sgt(mx)) mx = val;
+            }
+            return makeRange(context, mn, mx);
+        }
+        case Instruction::UDiv: {
+            auto ll = r1.udiv(l2);
+            auto rr = l1.udiv(r2);
+            APInt minVal = (ll.ult(rr) ? ll : rr);
+            APInt maxVal = (ll.ugt(rr) ? ll : rr);
+            return makeRange(context, minVal, maxVal);
+        }
+        default:
+            // llvm::errs() << "  => Unhandled op => infRange.\n";
+            return infRange();
         }
     }
 
