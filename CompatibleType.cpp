@@ -17,34 +17,37 @@
 #include "CompatibleType.hpp"
 #include "Utils.hpp"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 using namespace UnifiedMemSafe;
 
 int CountIndirections(Type *T){
-    if (!(T->isPointerTy()))
-    return 0;
+    if (!T->isPointerTy())
+        return 0;
     PointerType *innerT = dyn_cast_or_null<PointerType>(T);
     return CountIndirections(innerT->getElementType()) + 1;
 }
+
 // unwraps a pointer until the innermost type
 Type *UnwrapPointer(Type *T){
-    if (!(T->isPointerTy()))
-    return T;
+    if (!T->isPointerTy())
+        return T;
     PointerType *innerT = dyn_cast_or_null<PointerType>(T);
     return UnwrapPointer(innerT->getElementType());
 }
 
 /// Utility function: determines if the cast is potentially unsafe.
 bool isPotentiallyUnsafeCast(Type *innerSrcT,
-                                             Type *realSrcType,
-                                             Type *realDstType,
-                                             Type *innerDstT)
+                             Type *realSrcType,
+                             Type *realDstType,
+                             Type *innerDstT)
 {
     // Search subtypes of realSrcType to see if realDstType is present
     for (Type::subtype_iterator STI = realSrcType->subtype_begin(),
-                                STE = realSrcType->subtype_end();
+                                 STE = realSrcType->subtype_end();
          STI != STE; ++STI)
     {
         if ((llvm::Type *)STI == realDstType) {
@@ -60,19 +63,33 @@ bool isPotentiallyUnsafeCast(Type *innerSrcT,
         return true;
     }
 
-    // If none triggered, its not unsafe by the old definition
+    /* -----------------------------------------------------------------
+     *  NEW RULE:
+     *  If both realSrcType and realDstType are non-integer first-class
+     *  types (struct / array / vector / opaque) and they differ, regard
+     *  the cast as potentially unsafe.  This flags casts such as
+     *      i8* → %struct.foo*
+     *      %struct.A* → %struct.B*
+     *  that were previously treated as safe.
+     * ----------------------------------------------------------------- */
+    if (!realSrcType->isIntegerTy() && !realDstType->isIntegerTy()) {
+        if (realSrcType != realDstType)
+            return true;
+    }
+
+    // Otherwise considered safe
     return false;
 }
 
 /// Helper function: handle the case where CastInst operand is a LoadInst.
 bool handleLoadCast(CastInst *II,
-                                    LoadInst *loadInst,
-                                    std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
-                                    std::map<const UnifiedMemSafe::VariableMapKeyType *,
-                                             UnifiedMemSafe::VariableInfo>::iterator &it,
-                                    Type *innerSrcT,
-                                    Type *innerDstT,
-                                    const AnalysisState &TheState)
+                    LoadInst *loadInst,
+                    std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
+                    std::map<const UnifiedMemSafe::VariableMapKeyType *,
+                             UnifiedMemSafe::VariableInfo>::iterator &it,
+                    Type *innerSrcT,
+                    Type *innerDstT,
+                    const AnalysisState &TheState)
 {
     // Analyzing the "LoadInst" sub-case:
     Type *realSrcType = UnwrapPointer(loadInst->getType());
@@ -101,11 +118,10 @@ bool handleLoadCast(CastInst *II,
             break;
         }
     }
-    if (realDstType == nullptr) {
+    if (realDstType == nullptr)
         realDstType = innerDstT;
-    }
 
-    // Check if its an unsafe cast
+    // Check if it is an unsafe cast
     bool isLoadUnsafeCast = isPotentiallyUnsafeCast(innerSrcT, realSrcType, realDstType, innerDstT);
     if (!isLoadUnsafeCast) {
         // Erase from the set if safe
@@ -113,16 +129,13 @@ bool handleLoadCast(CastInst *II,
         if (UnifiedMemSafe::VariableMapKeyType *loadVar =
                 dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(II->getOperand(0)))
         {
-            if (heapDynPointerSet.find(loadVar) != heapDynPointerSet.end()) {
+            if (heapDynPointerSet.find(loadVar) != heapDynPointerSet.end())
                 heapDynPointerSet.erase(loadVar);
-            }
         }
-        return false; 
+        return false;
     }
-
     return true; // Keep going
 }
-
 
 /// Helper function: handle the case where CastInst operand is a GEP.
 bool handleGetElementPtrCast(
@@ -160,11 +173,10 @@ bool handleGetElementPtrCast(
             break;
         }
     }
-    if (realDstType == nullptr) {
+    if (realDstType == nullptr)
         realDstType = innerDstT;
-    }
 
-    // Check if its an unsafe cast
+    // Check if it is an unsafe cast
     bool isGEPUnsafeCast = isPotentiallyUnsafeCast(innerSrcT, realSrcType, realDstType, innerDstT);
     if (!isGEPUnsafeCast) {
         // Erase from the set if safe
@@ -172,15 +184,13 @@ bool handleGetElementPtrCast(
         if (UnifiedMemSafe::VariableMapKeyType *GEPVar =
                 dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(II->getOperand(0)))
         {
-            if (heapDynPointerSet.find(GEPVar) != heapDynPointerSet.end()) {
+            if (heapDynPointerSet.find(GEPVar) != heapDynPointerSet.end())
                 heapDynPointerSet.erase(GEPVar);
-            }
         }
-        return false; 
+        return false;
     }
     return true;
 }
-
 
 /// Helper function: handle the case where CastInst operand is another CastInst.
 bool handleCastInstCast(
@@ -218,11 +228,10 @@ bool handleCastInstCast(
             break;
         }
     }
-    if (realDstType == nullptr) {
+    if (realDstType == nullptr)
         realDstType = innerDstT;
-    }
 
-    // Check if its an unsafe cast
+    // Check if it is an unsafe cast
     bool isCastUnsafeCast = isPotentiallyUnsafeCast(innerSrcT, realSrcType, realDstType, innerDstT);
     if (!isCastUnsafeCast) {
         // Erase from the set if safe
@@ -230,15 +239,13 @@ bool handleCastInstCast(
         if (UnifiedMemSafe::VariableMapKeyType *CastVar =
                 dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(II->getOperand(0)))
         {
-            if (heapDynPointerSet.find(CastVar) != heapDynPointerSet.end()) {
+            if (heapDynPointerSet.find(CastVar) != heapDynPointerSet.end())
                 heapDynPointerSet.erase(CastVar);
-            }
         }
         return false;
     }
     return true;
 }
-
 
 /// Helper function: handle the case where CastInst operand is a CallInst.
 bool handleCallInstCast(
@@ -248,18 +255,58 @@ bool handleCallInstCast(
     std::map<const UnifiedMemSafe::VariableMapKeyType *,
              UnifiedMemSafe::VariableInfo>::iterator &it)
 {
-    // If operand is a CallInst, erase from the set
-    heapDynPointerSet.erase(it++);
-    if (UnifiedMemSafe::VariableMapKeyType *CallVar =
-            dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(op))
-    {
-        if (heapDynPointerSet.find(CallVar) != heapDynPointerSet.end()) {
-            heapDynPointerSet.erase(CallVar);
+    bool isUnsafe = false;
+
+    if (CallInst *CI = dyn_cast<CallInst>(op)) {
+        Function *Callee = CI->getCalledFunction();
+        if (Callee) {
+            StringRef FName = Callee->getName();
+
+            /* ------------------------------------------------------------
+             *  Detect undersized malloc / calloc followed by
+             *  cast to a larger struct type.
+             * ------------------------------------------------------------ */
+            if (FName == "malloc" || FName == "calloc") {
+                uint64_t allocSize = 0;
+
+                if (FName == "malloc") {
+                    if (auto *SzC = dyn_cast<ConstantInt>(CI->getArgOperand(0)))
+                        allocSize = SzC->getZExtValue();
+                } else { // calloc
+                    if (auto *CntC = dyn_cast<ConstantInt>(CI->getArgOperand(0)))
+                        if (auto *SzC = dyn_cast<ConstantInt>(CI->getArgOperand(1)))
+                            allocSize = CntC->getZExtValue() * SzC->getZExtValue();
+                }
+
+                if (allocSize > 0 && II->getDestTy()->isPointerTy()) {
+                    const DataLayout &DL = II->getModule()->getDataLayout();
+                    uint64_t dstSize =
+                        DL.getTypeAllocSize(UnwrapPointer(II->getDestTy()));
+
+                    /*  Flag as unsafe if the destination struct (or array, etc.)
+                     *  is larger than the allocation. */
+                    if (dstSize > allocSize)
+                        isUnsafe = true;
+                }
+            }
         }
     }
-    return false; // We erased the iterator
-}
 
+    if (!isUnsafe) {
+        /*  Previous behaviour: treat as safe and remove the entry. */
+        heapDynPointerSet.erase(it++);
+        if (UnifiedMemSafe::VariableMapKeyType *CallVar =
+                dyn_cast_or_null<UnifiedMemSafe::VariableMapKeyType>(op))
+        {
+            if (heapDynPointerSet.find(CallVar) != heapDynPointerSet.end())
+                heapDynPointerSet.erase(CallVar);
+        }
+        return false; // iterator erased
+    }
+
+    /* Keep the map entry so the pointer is reported as unsafe. */
+    return true;
+}
 
 bool handleCastOperation(
     CastInst *II,
@@ -272,11 +319,15 @@ bool handleCastOperation(
     Value *op = II->getOperand(0);
 
     if (LoadInst *loadInst = dyn_cast_or_null<LoadInst>(op)) {
-        return handleLoadCast(II, loadInst, heapDynPointerSet, it, innerSrcT, innerDstT, TheState);
-    } else if (GetElementPtrInst *gepInst = dyn_cast_or_null<GetElementPtrInst>(op)) {
-        return handleGetElementPtrCast(II, gepInst, heapDynPointerSet, it, innerSrcT, innerDstT);
+        return handleLoadCast(II, loadInst, heapDynPointerSet, it, innerSrcT,
+                              innerDstT, TheState);
+    } else if (GetElementPtrInst *gepInst =
+                   dyn_cast_or_null<GetElementPtrInst>(op)) {
+        return handleGetElementPtrCast(II, gepInst, heapDynPointerSet, it,
+                                       innerSrcT, innerDstT);
     } else if (CastInst *nestedCast = dyn_cast_or_null<CastInst>(op)) {
-        return handleCastInstCast(II, nestedCast, heapDynPointerSet, it, innerSrcT, innerDstT);
+        return handleCastInstCast(II, nestedCast, heapDynPointerSet, it,
+                                  innerSrcT, innerDstT);
     } else if (isa<CallInst>(op)) {
         return handleCallInstCast(II, op, heapDynPointerSet, it);
     }
@@ -285,11 +336,12 @@ bool handleCastOperation(
 
 void CompatibleType::safeTypeCastAnalysis(
     std::map<const VariableMapKeyType *, VariableInfo> &heapDynPointerSet,
-    const AnalysisState &TheState) 
+    const AnalysisState &TheState)
 {
     for (auto it = heapDynPointerSet.begin(); it != heapDynPointerSet.end();) {
         const Instruction *instruction = dyn_cast_or_null<Instruction>(it->first);
-        Instruction *dynInst = const_cast<llvm::Instruction *>(instruction);
+        Instruction *dynInst =
+            const_cast<llvm::Instruction *>(instruction);
 
         if (CastInst *II = dyn_cast_or_null<CastInst>(dynInst)) {
             Type *srcT = II->getSrcTy();
@@ -300,48 +352,35 @@ void CompatibleType::safeTypeCastAnalysis(
                 Type *innerDstT = UnwrapPointer(dstT);
 
                 if (CountIndirections(srcT) != CountIndirections(dstT) ||
-                    !innerSrcT->isIntegerTy() || 
-                    !innerDstT->isIntegerTy()) 
+                    !innerSrcT->isIntegerTy() || !innerDstT->isIntegerTy())
                 {
-                    if (!handleCastOperation(II, heapDynPointerSet, it, innerSrcT, innerDstT, TheState)) {
+                    if (!handleCastOperation(II, heapDynPointerSet, it,
+                                             innerSrcT, innerDstT, TheState))
                         continue;
-                    }
-                } else if (innerSrcT->isIntegerTy() && innerDstT->isIntegerTy() && !isa<SExtInst>(II) && !isa<TruncInst>(II)) {
-                    if (!handleCastOperation(II, heapDynPointerSet, it, innerSrcT, innerDstT, TheState)) {
+                } else if (innerSrcT->isIntegerTy() &&
+                           innerDstT->isIntegerTy() && !isa<SExtInst>(II) &&
+                           !isa<TruncInst>(II))
+                {
+                    if (!handleCastOperation(II, heapDynPointerSet, it,
+                                             innerSrcT, innerDstT, TheState))
                         continue;
-                    }
                 }
             } else if (!isa<SExtInst>(II) && !isa<TruncInst>(II)) {
                 Type *innerSrcT = UnwrapPointer(srcT);
                 Type *innerDstT = UnwrapPointer(dstT);
-                if (!handleCastOperation(II, heapDynPointerSet, it, innerSrcT, innerDstT, TheState)) {
+                if (!handleCastOperation(II, heapDynPointerSet, it, innerSrcT,
+                                         innerDstT, TheState))
                     continue;
-                }
             }
         }
 
-        if (!heapDynPointerSet.empty()) {
+        if (!heapDynPointerSet.empty())
             ++it;
-        } else {
+        else
             break;
-        }
     }
 
-    errs() << GREEN << "Unsafe Dyn Pointer After Compatible-Type Cast Analysis:\t"
+    errs() << GREEN
+           << "Unsafe Dyn Pointer After Compatible-Type Cast Analysis:\t"
            << DETAIL << heapDynPointerSet.size() << NORMAL << "\n\n\n";
-    
-    /*
-    for (const auto &pair : heapDynPointerSet) {
-        const llvm::Value *key = pair.first;
-
-        // Use llvm::dyn_cast to cast the key to an Instruction
-        if (const llvm::Instruction *instruction = llvm::dyn_cast<llvm::Instruction>(key)) {
-            // Print the instruction using LLVM's print method
-            instruction->print(llvm::outs());
-            llvm::outs() << "\n";
-        } 
-    }
-    */
-    
 }
-
